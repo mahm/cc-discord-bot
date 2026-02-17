@@ -4,7 +4,9 @@ import path from "path";
 import type { Config } from "./config";
 import type { Client, User } from "discord.js";
 import { sendToClaude } from "./claude-bridge";
-import { splitMessage } from "./bot";
+import { sendChunksWithFallback } from "./bot";
+
+const EMPTY_RESPONSE_FALLBACK_MESSAGE = "（エージェントが応答できませんでした）";
 
 interface Schedule {
   name: string;
@@ -51,13 +53,15 @@ async function buildPrompt(
 async function sendDiscordDM(
   client: Client,
   userId: string,
-  text: string
+  text: string,
+  context: string
 ): Promise<void> {
   const user: User = await client.users.fetch(userId);
-  const chunks = splitMessage(text);
-  for (const chunk of chunks) {
-    await user.send(chunk);
-  }
+  await sendChunksWithFallback((chunk) => user.send(chunk), text, {
+    fallbackMessage: EMPTY_RESPONSE_FALLBACK_MESSAGE,
+    source: "scheduler",
+    context,
+  });
 }
 
 function isSkipResponse(text: string): boolean {
@@ -95,7 +99,12 @@ async function runSchedule(
 
     if (schedule.discord_notify && client) {
       const targetUserId = config.allowedUserIds[0];
-      await sendDiscordDM(client, targetUserId, result.response);
+      await sendDiscordDM(
+        client,
+        targetUserId,
+        result.response,
+        `schedule=${schedule.name},user=${targetUserId}`
+      );
       console.log(
         `[scheduler] DM sent to ${targetUserId} for "${schedule.name}"`
       );
@@ -113,7 +122,8 @@ async function runSchedule(
       await sendDiscordDM(
         client,
         targetUserId,
-        `[Schedule Error] ${schedule.name}: ${errorMsg.slice(0, 1800)}`
+        `[Schedule Error] ${schedule.name}: ${errorMsg.slice(0, 1800)}`,
+        `schedule=${schedule.name},user=${targetUserId},error=true`
       ).catch((e) => console.error(`[scheduler] Failed to send error DM: ${e}`));
     }
 
