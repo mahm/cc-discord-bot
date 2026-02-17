@@ -60,6 +60,13 @@ async function sendDiscordDM(
   }
 }
 
+function isSkipResponse(text: string): boolean {
+  const normalized = text.trim();
+  return (
+    normalized.startsWith("[SKIP]") || normalized.endsWith("[SKIP]")
+  );
+}
+
 async function runSchedule(
   schedule: Schedule,
   settings: BotSettings,
@@ -79,8 +86,10 @@ async function runSchedule(
       `[scheduler] Schedule "${schedule.name}" completed in ${elapsed}s (${result.response.length} chars, session: ${result.sessionId})`
     );
 
-    if (schedule.skippable && result.response.trimStart().startsWith("[SKIP]")) {
-      console.log(`[scheduler] Schedule "${schedule.name}" skipped`);
+    if (schedule.skippable && isSkipResponse(result.response)) {
+      console.log(
+        `[scheduler] Schedule "${schedule.name}" skipped (reason=skip-token-at-start-or-end)`
+      );
       return result.response;
     }
 

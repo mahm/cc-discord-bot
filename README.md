@@ -135,7 +135,7 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 | `schedules[].prompt` | Claude に送るプロンプト。`{{datetime}}` で現在日時に置換される |
 | `schedules[].discord_notify` | 結果を Discord DM で通知するかどうか |
 | `schedules[].prompt_file` | ファイルの内容を `prompt` の前に結合して送る。プロジェクトルートからの相対パス（任意） |
-| `schedules[].skippable` | Claude の応答が `[SKIP]` で始まる場合に DM 通知を省略する（任意） |
+| `schedules[].skippable` | Claude の応答が `[SKIP]` で始まる、または終わる場合に DM 通知を省略する（任意） |
 
 ### HEARTBEAT の運用例
 
@@ -160,7 +160,7 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
       "cron": "*/10 6-22 * * *",
       "timezone": "Asia/Tokyo",
       "prompt_file": "HEARTBEAT.md",
-      "prompt": "現在時刻: {{datetime}}\n\n上記のハートビート設定に従い、マスターにDMを送るかどうか判断してください。\n送る場合はメッセージ本文のみを返してください。送らない場合は[SKIP]とだけ返してください。",
+      "prompt": "現在時刻: {{datetime}}\n\n上記のハートビート設定に従い、マスターにDMを送るかどうか判断してください。\n送る場合はメッセージ本文のみを返してください。送らない場合は返答の先頭または末尾に必ず[SKIP]を付けてください。",
       "discord_notify": true,
       "skippable": true
     }
@@ -187,7 +187,7 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 
 ## DMを送らない場合
 
-以下の場合は `[SKIP]` とだけ返答してください:
+以下の場合は、返答の先頭または末尾に必ず `[SKIP]` を付けてください:
 
 - 特に伝えることがないとき
 - 前回のハートビートで既にDMを送っていて、状況が変わっていないとき
@@ -204,7 +204,7 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 
 ## 最重要ルール
 
-送る必要がないと判断したら、迷わず `[SKIP]` を返してください。
+送る必要がないと判断したら、迷わず返答の先頭または末尾に `[SKIP]` を付けてください。
 ```
 
 ## DM の使い方
