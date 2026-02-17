@@ -13,6 +13,16 @@ dotenvConfig({ path: path.join(PROJECT_ROOT, ".env") });
 
 const SESSION_DIR = path.join(os.tmpdir(), "cc-discord-bot");
 const SESSION_FILE = path.join(SESSION_DIR, "session_id.txt");
+const ATTACHMENT_ROOT_DIR = path.join(
+  PROJECT_ROOT,
+  "tmp",
+  "cc-discord-bot",
+  "attachments"
+);
+const MAX_ATTACHMENT_BYTES_PER_FILE = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES_PER_MESSAGE = 50 * 1024 * 1024;
+const ATTACHMENT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 30 * 1000;
 
 export interface Config {
   discordBotToken: string;
@@ -22,6 +32,11 @@ export interface Config {
   sessionFile: string;
   sessionDir: string;
   claudeTimeout: number;
+  attachmentRootDir: string;
+  maxAttachmentBytesPerFile: number;
+  maxAttachmentBytesPerMessage: number;
+  attachmentRetentionMs: number;
+  attachmentDownloadTimeoutMs: number;
 }
 
 export function loadConfig(): Config {
@@ -43,5 +58,10 @@ export function loadConfig(): Config {
     sessionFile: SESSION_FILE,
     sessionDir: SESSION_DIR,
     claudeTimeout: 5 * 60 * 1000, // 5 minutes
+    attachmentRootDir: ATTACHMENT_ROOT_DIR,
+    maxAttachmentBytesPerFile: MAX_ATTACHMENT_BYTES_PER_FILE,
+    maxAttachmentBytesPerMessage: MAX_ATTACHMENT_BYTES_PER_MESSAGE,
+    attachmentRetentionMs: ATTACHMENT_RETENTION_MS,
+    attachmentDownloadTimeoutMs: ATTACHMENT_DOWNLOAD_TIMEOUT_MS,
   };
 }

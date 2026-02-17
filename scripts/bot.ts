@@ -7,6 +7,11 @@ import {
 } from "discord.js";
 import { sendToClaude, clearSession, getSessionId } from "./claude-bridge";
 import type { Config } from "./config";
+import {
+  AttachmentError,
+  cleanupExpiredAttachments,
+  collectMessageAttachments,
+} from "./attachments";
 
 const DISCORD_MAX_LENGTH = 2000;
 
@@ -59,6 +64,11 @@ export function createBot(config: Config, options?: BotOptions): Client {
 
   client.on("clientReady", () => {
     console.log(`Bot connected as ${client.user?.tag}`);
+    cleanupExpiredAttachments(config).catch((error) => {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      console.warn(`[attachments] Initial cleanup failed: ${errorMessage}`);
+    });
   });
 
   client.on("messageCreate", async (message: Message) => {
@@ -75,7 +85,8 @@ export function createBot(config: Config, options?: BotOptions): Client {
     }
 
     const content = message.content.trim();
-    if (!content) return;
+    const hasAttachments = message.attachments.size > 0;
+    if (!content && !hasAttachments) return;
 
     const channel = message.channel as DMChannel;
 
@@ -117,10 +128,21 @@ export function createBot(config: Config, options?: BotOptions): Client {
     await channel.sendTyping().catch(() => {});
 
     try {
-      console.log(`Processing message from ${message.author.tag}: ${content.slice(0, 100)}`);
+      await cleanupExpiredAttachments(config).catch((error) => {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        console.warn(`[attachments] Cleanup failed: ${errorMessage}`);
+      });
+
+      const attachments = await collectMessageAttachments(message, config);
+      const preview = content ? content.slice(0, 100) : "(no text)";
+      console.log(
+        `Processing message from ${message.author.tag}: ${preview} (attachments=${attachments.length})`
+      );
 
       const result = await sendToClaude(content, config, {
         bypassMode: options?.bypassMode,
+        attachments,
       });
 
       // Stop typing indicator
@@ -143,11 +165,16 @@ export function createBot(config: Config, options?: BotOptions): Client {
         error instanceof Error ? error.message : String(error);
       console.error(`Error processing message: ${errorMessage}`);
 
+      const userErrorMessage =
+        error instanceof AttachmentError
+          ? `Attachment error: ${error.message}`
+          : `Error: ${errorMessage}`;
+
       // React to indicate error
       await message.react("\u274C").catch(() => {}); // ❌
 
       await channel
-        .send(`Error: ${errorMessage.slice(0, 1900)}`)
+        .send(userErrorMessage.slice(0, 1900))
         .catch(() => {});
     } finally {
       processing = false;

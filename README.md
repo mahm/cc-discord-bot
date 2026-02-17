@@ -1,6 +1,6 @@
 # cc-discord-bot
 
-Claude CodeをDiscordボット化するスキルです。主にパーソナルエージェントとしての運用に適しています。DM経由での応答のみに対応しています。
+Claude Code を Discord ボット化するスキルです。パーソナルエージェントとしての運用を想定しており、DM 経由での応答のみに対応しています。
 
 > [!NOTE]
 > このREADMEは、Claude Code 向けのエージェントスキルとして `.claude/skills/cc-discord-bot` に配置されている前提で書かれています。
@@ -215,6 +215,23 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 |----------|------|
 | `!reset` | セッションをクリアする |
 | `!session` | 現在のセッション ID を表示する |
+
+### 添付ファイル
+
+DM にファイルを添付して送ることができます。
+
+対応する添付ファイル形式:
+- 画像: `image/*`
+- PDF: `application/pdf`
+- テキスト: `text/*`
+
+サイズ上限:
+- 1 ファイルあたり最大 25MB、1 メッセージあたり合計 50MB
+
+保存先と保持期間:
+- `tmp/cc-discord-bot/attachments/<messageId>/` に保存され、24 時間経過後に自動削除されます
+
+テキストなしで添付だけ送っても、テキストと添付を混在させても処理されます。未対応の添付ファイル形式やサイズ超過の場合は DM でエラーが返ります。
 
 ## トラブルシューティング
 

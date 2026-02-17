@@ -1,6 +1,10 @@
 import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import type { Config } from "./config";
+import {
+  buildAttachmentPromptBlock,
+  type AttachmentInput,
+} from "./attachments";
 
 export interface ClaudeResponse {
   response: string;
@@ -38,6 +42,7 @@ export async function getSessionId(config: Config): Promise<string | null> {
 
 export interface SendToClaudeOptions {
   bypassMode?: boolean;
+  attachments?: AttachmentInput[];
 }
 
 async function ensureClaudeSandbox(config: Config): Promise<string> {
@@ -106,11 +111,25 @@ export async function sendToClaude(
   const now = new Date();
   const timeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
+  const attachmentBlock = buildAttachmentPromptBlock(options?.attachments ?? []);
+  const trimmedMessage = message.trim();
+  const promptMessageParts: string[] = [];
+  if (trimmedMessage) {
+    promptMessageParts.push(trimmedMessage);
+  }
+  if (attachmentBlock) {
+    promptMessageParts.push(attachmentBlock);
+  }
+  if (promptMessageParts.length === 0) {
+    promptMessageParts.push("(No text message was provided.)");
+  }
+  const promptMessage = promptMessageParts.join("\n\n");
+
   const templatePath = path.join(config.skillRoot, "PROMPT_TEMPLATE.md");
   const template = await readFile(templatePath, "utf-8");
   const prompt = template
     .replace("{{datetime}}", timeStr)
-    .replace("{{message}}", message);
+    .replace("{{message}}", promptMessage);
 
   // Build CLI args with append-system-prompt for concise responses
   const systemPromptFile = path.join(config.skillRoot, "APPEND_SYSTEM_PROMPT.md");
