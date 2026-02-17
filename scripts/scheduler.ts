@@ -1,0 +1,158 @@
+import { Cron } from "croner";
+import { readFile } from "fs/promises";
+import path from "path";
+import type { Config } from "./config";
+import type { Client, User } from "discord.js";
+import { sendToClaude } from "./claude-bridge";
+import { splitMessage } from "./bot";
+
+interface Schedule {
+  name: string;
+  cron: string;
+  timezone: string;
+  prompt: string;
+  discord_notify: boolean;
+  prompt_file?: string;
+  skippable?: boolean;
+}
+
+interface BotSettings {
+  "bypass-mode"?: boolean;
+  schedules: Schedule[];
+}
+
+export async function loadBotSettings(
+  config: Config
+): Promise<BotSettings> {
+  const settingsPath = path.join(config.projectRoot, ".claude", "settings.bot.json");
+  const content = await readFile(settingsPath, "utf-8");
+  return JSON.parse(content) as BotSettings;
+}
+
+function expandPrompt(template: string): string {
+  const now = new Date();
+  const datetimeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  return template.replace(/\{\{datetime\}\}/g, datetimeStr);
+}
+
+async function buildPrompt(
+  schedule: Schedule,
+  config: Config
+): Promise<string> {
+  let prompt = schedule.prompt;
+  if (schedule.prompt_file) {
+    const filePath = path.join(config.projectRoot, schedule.prompt_file);
+    const fileContent = await readFile(filePath, "utf-8");
+    prompt = fileContent + "\n\n---\n\n" + prompt;
+  }
+  return expandPrompt(prompt);
+}
+
+async function sendDiscordDM(
+  client: Client,
+  userId: string,
+  text: string
+): Promise<void> {
+  const user: User = await client.users.fetch(userId);
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    await user.send(chunk);
+  }
+}
+
+async function runSchedule(
+  schedule: Schedule,
+  settings: BotSettings,
+  config: Config,
+  client?: Client
+): Promise<string> {
+  console.log(`[scheduler] Running schedule: ${schedule.name}`);
+  const startTime = Date.now();
+
+  try {
+    const prompt = await buildPrompt(schedule, config);
+    const result = await sendToClaude(prompt, config, {
+      bypassMode: settings["bypass-mode"],
+    });
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(
+      `[scheduler] Schedule "${schedule.name}" completed in ${elapsed}s (${result.response.length} chars, session: ${result.sessionId})`
+    );
+
+    if (schedule.skippable && result.response.trimStart().startsWith("[SKIP]")) {
+      console.log(`[scheduler] Schedule "${schedule.name}" skipped`);
+      return result.response;
+    }
+
+    if (schedule.discord_notify && client) {
+      const targetUserId = config.allowedUserIds[0];
+      await sendDiscordDM(client, targetUserId, result.response);
+      console.log(
+        `[scheduler] DM sent to ${targetUserId} for "${schedule.name}"`
+      );
+    }
+
+    return result.response;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[scheduler] Schedule "${schedule.name}" failed: ${errorMsg}`
+    );
+
+    if (schedule.discord_notify && client) {
+      const targetUserId = config.allowedUserIds[0];
+      await sendDiscordDM(
+        client,
+        targetUserId,
+        `[Schedule Error] ${schedule.name}: ${errorMsg.slice(0, 1800)}`
+      ).catch((e) => console.error(`[scheduler] Failed to send error DM: ${e}`));
+    }
+
+    throw error;
+  }
+}
+
+export function startScheduler(
+  settings: BotSettings,
+  config: Config,
+  client: Client
+): void {
+  if (settings.schedules.length === 0) {
+    console.log("[scheduler] No schedules configured");
+    return;
+  }
+
+  for (const schedule of settings.schedules) {
+    const job = new Cron(schedule.cron, { timezone: schedule.timezone }, () => {
+      runSchedule(schedule, settings, config, client).catch(() => {
+        // Error already logged in runSchedule
+      });
+    });
+
+    const nextRun = job.nextRun();
+    console.log(
+      `[scheduler] Registered "${schedule.name}" (${schedule.cron}) ` +
+        `timezone=${schedule.timezone}, next=${nextRun?.toISOString() ?? "unknown"}`
+    );
+  }
+
+  console.log(
+    `[scheduler] Started with ${settings.schedules.length} schedule(s)`
+  );
+}
+
+export async function runScheduleByName(
+  name: string,
+  settings: BotSettings,
+  config: Config
+): Promise<string> {
+  const schedule = settings.schedules.find((s) => s.name === name);
+  if (!schedule) {
+    const available = settings.schedules.map((s) => s.name).join(", ");
+    throw new Error(
+      `Schedule "${name}" not found. Available: ${available || "(none)"}`
+    );
+  }
+
+  return runSchedule(schedule, settings, config);
+}
