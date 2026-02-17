@@ -1,85 +1,83 @@
-# Discord Bot
+# cc-discord-bot
 
-Discord DMを受信すると Claude Code CLI を呼び出し、応答をDMで返すBotです。
+Claude CodeをDiscordボット化するスキルです。主にパーソナルエージェントとしての運用に適しています。DM経由での応答のみに対応しています。
 
-このREADMEで説明する内容は、Claude Code専用のエージェントスキルを前提にしています。
-スキルは `.claude/skills/cc-discord-bot` というディレクトリ名で配置されていることを前提にしています。
+> [!NOTE]
+> このREADMEは、Claude Code 向けのエージェントスキルとして `.claude/skills/cc-discord-bot` に配置されている前提で書かれています。
 
-## 対応環境・前提条件
+## 動作環境
 
 - OS: macOS / Linux
 - ランタイム: [Bun](https://bun.sh/)
-- コンテナ実行基盤: Docker Desktop (Docker Sandbox 利用前提)
-- 常駐運用: `tmux` (推奨)
+- コンテナ: Docker Desktop（Docker Sandbox を使用）
+- 常駐運用: `tmux` 推奨
 
-運用前提:
-- このBotは `docker sandbox run --detached claude` でSandboxを確保し、`docker exec ... claude` で実行します。
-- 起動前に `docker sandbox version` が通ることを確認してください。
+この Bot は `docker sandbox run --detached claude` で Sandbox を確保し、`docker exec ... claude` で Claude を実行します。起動前に `docker sandbox version` が通ることを確認してください。
 
-## セットアップ手順
+## セットアップ
 
-### 1. Discord Botの作成
+### 1. Discord Bot を作成する
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリケーションを作成
-2. 左メニュー `Bot` → `Add Bot`
-3. Botトークンをコピー（必要なら `Reset Token` で再生成）
-4. `MESSAGE CONTENT INTENT` はOFFでOK（DM利用では不要）
+2. 左メニューの `Bot` → `Add Bot`
+3. Bot トークンをコピー（`Reset Token` で再生成も可能）
+4. `MESSAGE CONTENT INTENT` は OFF のままで OK（DM には不要）
 
-### 2. Botをサーバーに招待
+### 2. Bot をサーバーに招待する
 
-1. 左メニュー `OAuth2` → `URL Generator`
+1. 左メニューの `OAuth2` → `URL Generator`
 2. Scopes: `bot`
 3. Bot Permissions: `Send Messages`
-4. 生成URLでサーバーに招待
+4. 生成された URL を使ってサーバーに招待
 
-### 3. 環境変数の設定
+### 3. 環境変数を設定する
 
-プロジェクトルートの `.env` に設定:
+プロジェクトルートの `.env` に以下を記載します。
 
 ```dotenv
 DISCORD_BOT_TOKEN=<Botトークン>
 DISCORD_ALLOWED_USER_IDS=<許可するDiscordユーザーID>
 ```
 
-複数ユーザーを許可する場合:
+複数ユーザーを許可する場合はカンマ区切りで指定します。
 
 ```dotenv
 DISCORD_ALLOWED_USER_IDS=123456789,987654321
 ```
 
-DiscordユーザーID確認:
-- Discord設定 → 詳細設定 → 開発者モードをON
+Discord ユーザー ID の確認方法:
+- Discord の設定 → 詳細設定 → 開発者モードを ON にする
 - 自分のアイコンを右クリック → `IDをコピー`
 
-### 4. 依存インストールと型チェック
+### 4. 依存パッケージのインストールと型チェック
 
 ```bash
 bun install --cwd .claude/skills/cc-discord-bot/scripts
 bun run --cwd .claude/skills/cc-discord-bot/scripts typecheck
 ```
 
-### 5. Docker Sandbox 初期化（初回のみ）
+### 5. Docker Sandbox の初期化（初回のみ）
 
 ```bash
-# Sandbox CLIが使えることを確認
+# Sandbox CLI の動作確認
 docker sandbox version
 
-# 初回ログインが必要な場合は対話で起動して /login を実行
+# ログインが必要な場合は対話モードで起動して /login を実行
 docker sandbox run --workspace "$(pwd)" claude
 ```
 
-`Not logged in · Please run /login` が返る場合は、上記コマンドでログインを完了してください。
+`Not logged in · Please run /login` と表示された場合は、上記コマンドでログインしてください。
 
-### 6. 起動
+### 6. 起動する
 
 ```bash
-# 常駐モード（フォアグラウンド）
+# フォアグラウンドで起動
 bun run .claude/skills/cc-discord-bot/scripts/main.ts
 
-# 常駐モード（tmuxバックグラウンド）
+# tmux でバックグラウンド起動
 tmux new -d -s cc-discord-bot "bun run .claude/skills/cc-discord-bot/scripts/main.ts"
 
-# セッション確認 / 接続 / 停止
+# セッションの確認・接続・停止
 tmux ls
 tmux attach -t cc-discord-bot
 tmux kill-session -t cc-discord-bot
@@ -93,24 +91,23 @@ tmux kill-session -t cc-discord-bot
 bun run .claude/skills/cc-discord-bot/scripts/main.ts
 ```
 
-- Discord DMを受信してClaudeへ転送
-- `.claude/settings.bot.json` のスケジュールを自動実行
+DM の受信と Claude への転送を行います。`.claude/settings.bot.json` に定義したスケジュールも自動で実行されます。
 
-### 単発DM送信モード
+### 単発 DM 送信
 
 ```bash
 bun run .claude/skills/cc-discord-bot/scripts/main.ts send <userId> "message"
 ```
 
-### スケジュール手動実行モード
+### スケジュールの手動実行
 
 ```bash
 bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 ```
 
-## 定期実行（スケジューラー）
+## スケジューラー
 
-常駐モードでは `.claude/settings.bot.json` の `schedules` が cron で実行されます。
+常駐モードでは `.claude/settings.bot.json` の `schedules` に定義した内容が cron で定期実行されます。
 
 設定例:
 
@@ -131,34 +128,100 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 
 | フィールド | 説明 |
 |-----------|------|
-| `bypass-mode` | 任意。`true` で Claude CLI に `--dangerously-skip-permissions` を付与 |
-| `schedules[].name` | スケジュール識別名（ログ・手動実行用） |
-| `schedules[].cron` | cron式（分 時 日 月 曜日） |
+| `bypass-mode` | `true` にすると Claude CLI に `--dangerously-skip-permissions` を付与する（任意） |
+| `schedules[].name` | スケジュールの識別名。ログや手動実行時に使う |
+| `schedules[].cron` | cron 式（分 時 日 月 曜日） |
 | `schedules[].timezone` | タイムゾーン |
-| `schedules[].prompt` | Claudeへ送るプロンプト（`{{datetime}}` 置換対応） |
-| `schedules[].discord_notify` | 結果をDiscord DMで通知するか |
-| `schedules[].prompt_file` | 任意。ファイル内容を `prompt` 前に結合（プロジェクトルート相対） |
-| `schedules[].skippable` | 任意。応答が `[SKIP]` で始まる場合にDM通知をスキップ |
+| `schedules[].prompt` | Claude に送るプロンプト。`{{datetime}}` で現在日時に置換される |
+| `schedules[].discord_notify` | 結果を Discord DM で通知するかどうか |
+| `schedules[].prompt_file` | ファイルの内容を `prompt` の前に結合して送る。プロジェクトルートからの相対パス（任意） |
+| `schedules[].skippable` | Claude の応答が `[SKIP]` で始まる場合に DM 通知を省略する（任意） |
 
-## DMでの使い方
+### HEARTBEAT の運用例
 
-- 許可ユーザーからのDMのみ処理します
-- メッセージは1件ずつ直列処理します（処理中は待機メッセージを返します）
-- Claude応答が長い場合は自動分割して送信します
+このリポジトリで実際に使っている構成に近い例です。
+プロジェクトルートに `HEARTBEAT.md` を置き、`06:00〜22:59（Asia/Tokyo）` の間、10分ごとに DM を送るかどうかを Claude に判断させます。
 
-コマンド:
+`.claude/settings.bot.json`:
+
+```json
+{
+  "bypass-mode": true,
+  "schedules": [
+    {
+      "name": "morning-plan",
+      "cron": "0 6 * * *",
+      "timezone": "Asia/Tokyo",
+      "prompt": "/daily-planner を実行してください。\n\n完了後、今日のTODOをDiscord DM向けに要約してください:\n- 2週間逆算チェックの警告があれば最初に記載\n- 今日のゴール(1-3個)\n- タイムラインの概要\n- 優先タスク一覧(各1行)",
+      "discord_notify": true
+    },
+    {
+      "name": "heartbeat",
+      "cron": "*/10 6-22 * * *",
+      "timezone": "Asia/Tokyo",
+      "prompt_file": "HEARTBEAT.md",
+      "prompt": "現在時刻: {{datetime}}\n\n上記のハートビート設定に従い、マスターにDMを送るかどうか判断してください。\n送る場合はメッセージ本文のみを返してください。送らない場合は[SKIP]とだけ返してください。",
+      "discord_notify": true,
+      "skippable": true
+    }
+  ]
+}
+```
+
+`HEARTBEAT.md` の例:
+
+```md
+# Heartbeat 設定
+
+10分ごとにこのプロンプトが実行されます。マスターにDMを送るかどうか、あなたが判断してください。
+
+## DMを送る場合
+
+以下のような場面ではDMを送ってください:
+
+- マスターが取り組んでいるタスクについて「そろそろ終わりました?」と軽く聞きたいとき(ただし前回聞いてから十分時間が経っていること)
+- 今日のTODOファイルを確認して、期限が近いものや忘れていそうなものがあるとき
+- 会議の15-30分前のリマインダー(カレンダーを確認してください)
+- 長時間作業が続いていそうなときの息抜きの声かけ
+- 共有したい気づきや提案があるとき
+
+## DMを送らない場合
+
+以下の場合は `[SKIP]` とだけ返答してください:
+
+- 特に伝えることがないとき
+- 前回のハートビートで既にDMを送っていて、状況が変わっていないとき
+- 直近のDM会話でやり取りしたばかりのとき(30分以内)
+- 判断に迷ったとき(迷うくらいなら送らない)
+
+## トーンとスタイル
+
+- 短く(1-3文)
+- 具体的な内容に触れる(「お疲れ様です」だけのような中身のない声かけはNG)
+- 押し付けがましくない、自然な感じ
+- 「〜ですか?」「〜どうです?」のような軽い問いかけ
+- マスターのペースを尊重する
+
+## 最重要ルール
+
+送る必要がないと判断したら、迷わず `[SKIP]` を返してください。
+```
+
+## DM の使い方
+
+許可されたユーザーからの DM だけを処理します。メッセージは 1 件ずつ直列で処理されるため、処理中に送ったメッセージには待機中の旨が返ります。Claude の応答が長い場合は自動的に分割して送信します。
 
 | コマンド | 説明 |
 |----------|------|
-| `!reset` | セッションをクリア |
-| `!session` | 現在のセッションIDを表示 |
+| `!reset` | セッションをクリアする |
+| `!session` | 現在のセッション ID を表示する |
 
 ## トラブルシューティング
 
-| 問題 | 対処 |
+| 症状 | 対処 |
 |------|------|
-| Botがオフライン | `.env` の `DISCORD_BOT_TOKEN` と Bot有効状態を確認 |
-| DMに反応しない | `DISCORD_ALLOWED_USER_IDS` の値を確認 |
-| Claude実行エラー | `docker sandbox ls` でSandbox状態を確認。`Not logged in` の場合は `docker sandbox run --workspace \"$(pwd)\" claude` で `/login` 実行 |
-| スケジュールが動かない | `.claude/settings.bot.json` のJSON/cron/timezoneを確認 |
-| セッション不整合 | `!reset` でセッションを初期化 |
+| Bot がオフラインのまま | `.env` の `DISCORD_BOT_TOKEN` が正しいか、Bot が有効になっているか確認 |
+| DM に反応しない | `DISCORD_ALLOWED_USER_IDS` の値を確認 |
+| Claude の実行でエラーになる | `docker sandbox ls` で Sandbox の状態を確認。`Not logged in` と出る場合は `docker sandbox run --workspace "$(pwd)" claude` で `/login` を実行 |
+| スケジュールが動かない | `.claude/settings.bot.json` の JSON 構文・cron 式・timezone を確認 |
+| セッションの挙動がおかしい | `!reset` でセッションを初期化 |
