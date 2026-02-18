@@ -3,6 +3,7 @@ import path from "node:path";
 import { Cron } from "croner";
 import type { Client, User } from "discord.js";
 import { type BotSettings, parseBotSettings } from "../core/bot-settings";
+import { runWithEmptyResponseRetry } from "../core/claude-retry";
 import {
   EMPTY_RESPONSE_FALLBACK_MESSAGE,
   isSkipResponse,
@@ -60,13 +61,20 @@ async function runSchedule(
 
   try {
     const prompt = await buildPrompt(schedule, config);
-    const result = await sendToClaude(prompt, config, {
-      bypassMode: settings["bypass-mode"],
-      source: "scheduler",
-    });
+    const { result, attempts } = await runWithEmptyResponseRetry(
+      async () =>
+        await sendToClaude(prompt, config, {
+          bypassMode: settings["bypass-mode"],
+          source: "scheduler",
+        }),
+      {
+        source: "scheduler",
+        context: `schedule=${schedule.name}`,
+      },
+    );
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(
-      `[scheduler] Schedule "${schedule.name}" completed in ${elapsed}s (${result.response.length} chars, session: ${result.sessionId})`,
+      `[scheduler] Schedule "${schedule.name}" completed in ${elapsed}s (${result.response.length} chars, session: ${result.sessionId}, attempts=${attempts})`,
     );
 
     if (schedule.skippable && isSkipResponse(result.response)) {

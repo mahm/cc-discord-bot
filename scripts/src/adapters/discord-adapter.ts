@@ -1,4 +1,5 @@
 import { Client, type DMChannel, GatewayIntentBits, type Message, Partials } from "discord.js";
+import { runWithEmptyResponseRetry } from "../core/claude-retry";
 import { EMPTY_RESPONSE_FALLBACK_MESSAGE, sendChunksWithFallback } from "../core/message-format";
 import {
   AttachmentError,
@@ -59,12 +60,25 @@ async function processQueuedMessage(
       `Processing message from ${message.author.tag}: ${preview} (attachments=${attachments.length})`,
     );
 
-    const result = await sendToClaude(content, config, {
-      bypassMode: options?.bypassMode,
-      attachments,
-      source: "dm",
-      authorId: message.author.id,
-    });
+    const { result, attempts } = await runWithEmptyResponseRetry(
+      async () =>
+        await sendToClaude(content, config, {
+          bypassMode: options?.bypassMode,
+          attachments,
+          source: "dm",
+          authorId: message.author.id,
+        }),
+      {
+        source: "dm",
+        context: `user=${message.author.id}`,
+      },
+    );
+
+    if (attempts > 1) {
+      console.log(
+        `[claude-retry] Recovered non-empty response after ${attempts} attempts (user=${message.author.id})`,
+      );
+    }
 
     await sendChunksWithFallback((chunk) => channel.send(chunk), result.response, {
       fallbackMessage: EMPTY_RESPONSE_FALLBACK_MESSAGE,
@@ -73,7 +87,9 @@ async function processQueuedMessage(
     });
 
     await message.react("\u2705").catch(() => {}); // ✅
-    console.log(`Response sent (${result.response.length} chars, session: ${result.sessionId})`);
+    console.log(
+      `Response sent (${result.response.length} chars, session: ${result.sessionId}, attempts=${attempts})`,
+    );
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`Error processing message: ${errorMessage}`);
