@@ -1,15 +1,29 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
-import path from "path";
-import type { Config } from "./config";
-import {
-  buildAttachmentPromptBlock,
-  type AttachmentInput,
-} from "./attachments";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { type AttachmentInput, buildAttachmentPromptBlock } from "./attachments-adapter";
+import type { Config } from "./config-adapter";
 
 export interface ClaudeResponse {
   response: string;
   sessionId: string;
 }
+
+export interface SendToClaudeOptions {
+  bypassMode?: boolean;
+  attachments?: AttachmentInput[];
+  source?: "dm" | "scheduler" | "manual";
+}
+
+interface ClaudeJob {
+  message: string;
+  config: Config;
+  options?: SendToClaudeOptions;
+  resolve: (value: ClaudeResponse) => void;
+  reject: (reason?: unknown) => void;
+}
+
+const claudeQueue: ClaudeJob[] = [];
+let queueWorkerRunning = false;
 
 async function readSessionId(config: Config): Promise<string | null> {
   try {
@@ -20,10 +34,7 @@ async function readSessionId(config: Config): Promise<string | null> {
   }
 }
 
-async function writeSessionId(
-  config: Config,
-  sessionId: string
-): Promise<void> {
+async function writeSessionId(config: Config, sessionId: string): Promise<void> {
   await mkdir(config.sessionDir, { recursive: true });
   await writeFile(config.sessionFile, sessionId, "utf-8");
 }
@@ -40,28 +51,15 @@ export async function getSessionId(config: Config): Promise<string | null> {
   return readSessionId(config);
 }
 
-export interface SendToClaudeOptions {
-  bypassMode?: boolean;
-  attachments?: AttachmentInput[];
-}
-
 async function ensureClaudeSandbox(config: Config): Promise<string> {
   const proc = Bun.spawn(
-    [
-      "docker",
-      "sandbox",
-      "run",
-      "--detached",
-      "--workspace",
-      config.projectRoot,
-      "claude",
-    ],
+    ["docker", "sandbox", "run", "--detached", "--workspace", config.projectRoot, "claude"],
     {
       cwd: config.projectRoot,
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env },
-    }
+    },
   );
 
   const [stdout, stderr] = await Promise.all([
@@ -72,9 +70,7 @@ async function ensureClaudeSandbox(config: Config): Promise<string> {
 
   if (exitCode !== 0) {
     const errorMsg =
-      stderr.trim() ||
-      stdout.trim() ||
-      `Failed to ensure Docker sandbox (exit code ${exitCode})`;
+      stderr.trim() || stdout.trim() || `Failed to ensure Docker sandbox (exit code ${exitCode})`;
     throw new Error(errorMsg);
   }
 
@@ -86,28 +82,24 @@ async function ensureClaudeSandbox(config: Config): Promise<string> {
 
   if (!sandboxId || !/^[a-f0-9]{12,64}$/i.test(sandboxId)) {
     const joined = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
-    throw new Error(
-      `Failed to resolve Docker sandbox ID. Output: ${joined.slice(0, 500)}`
-    );
+    throw new Error(`Failed to resolve Docker sandbox ID. Output: ${joined.slice(0, 500)}`);
   }
 
   return sandboxId;
 }
 
-export async function sendToClaude(
+async function runClaudeCommand(
   message: string,
   config: Config,
-  options?: SendToClaudeOptions
+  options?: SendToClaudeOptions,
+  retried = false,
 ): Promise<ClaudeResponse> {
   if (!Bun.which("docker")) {
-    throw new Error(
-      "Docker CLI is required. Install Docker Desktop and enable Docker Sandbox."
-    );
+    throw new Error("Docker CLI is required. Install Docker Desktop and enable Docker Sandbox.");
   }
 
   const sessionId = await readSessionId(config);
 
-  // Build prompt from template with current datetime
   const now = new Date();
   const timeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
@@ -125,16 +117,16 @@ export async function sendToClaude(
   }
   const promptMessage = promptMessageParts.join("\n\n");
 
-  const templatePath = path.join(config.skillRoot, "PROMPT_TEMPLATE.md");
-  const template = await readFile(templatePath, "utf-8");
-  const prompt = template
-    .replace("{{datetime}}", timeStr)
-    .replace("{{message}}", promptMessage);
+  const template = await readFile(config.promptTemplatePath, "utf-8");
+  const prompt = template.replace("{{datetime}}", timeStr).replace("{{message}}", promptMessage);
 
-  // Build CLI args with append-system-prompt for concise responses
-  const systemPromptFile = path.join(config.skillRoot, "APPEND_SYSTEM_PROMPT.md");
-  const args = ["-p", "--output-format", "json",
-    "--append-system-prompt-file", systemPromptFile];
+  const args = [
+    "-p",
+    "--output-format",
+    "json",
+    "--append-system-prompt-file",
+    config.appendSystemPromptPath,
+  ];
   if (options?.bypassMode) {
     args.push("--dangerously-skip-permissions");
   }
@@ -160,11 +152,10 @@ export async function sendToClaude(
     ...args,
   ];
 
-  const logArgs = args.map((a, i) =>
-    i === args.length - 1 ? `${a.slice(0, 100)}...` : a
-  );
+  const source = options?.source ?? "unknown";
+  const logArgs = args.map((a, i) => (i === args.length - 1 ? `${a.slice(0, 100)}...` : a));
   console.log(
-    `[claude] $ docker exec -w ${config.projectRoot} -e FORCE_COLOR=0 -e CLAUDECODE= -e MAH_TODO_CONFIG_DIR=${sandboxConfigDir} ${sandboxId} claude ${logArgs.join(" ")}`
+    `[claude] source=${source} $ docker exec -w ${config.projectRoot} -e FORCE_COLOR=0 -e CLAUDECODE= -e MAH_TODO_CONFIG_DIR=${sandboxConfigDir} ${sandboxId} claude ${logArgs.join(" ")}`,
   );
 
   const proc = Bun.spawn(["docker", ...dockerExecArgs], {
@@ -174,7 +165,6 @@ export async function sendToClaude(
     env: { ...process.env },
   });
 
-  // Set up timeout
   const timeout = setTimeout(() => {
     proc.kill();
   }, config.claudeTimeout);
@@ -189,31 +179,32 @@ export async function sendToClaude(
     clearTimeout(timeout);
 
     if (exitCode !== 0) {
-      const errorMsg =
-        stderr.trim() ||
-        stdout.trim() ||
-        `Claude CLI exited with code ${exitCode}`;
-      if (
-        sessionId &&
-        errorMsg.includes("No conversation found with session ID")
-      ) {
+      const errorMsg = stderr.trim() || stdout.trim() || `Claude CLI exited with code ${exitCode}`;
+
+      if (sessionId && !retried && errorMsg.includes("No conversation found with session ID")) {
         console.warn(
-          "[claude] Session was not found in sandbox. Clearing session and retrying once."
+          "[claude] Session was not found in sandbox. Clearing session and retrying once.",
         );
         await clearSession(config);
-        return sendToClaude(message, config, options);
+        return runClaudeCommand(message, config, options, true);
       }
+
       throw new Error(errorMsg);
     }
 
-    // Parse JSON response
     let parsed: { result: string; session_id: string };
     try {
       parsed = JSON.parse(stdout);
     } catch {
-      // If JSON parsing fails, treat stdout as plain text response
       throw new Error(
-        `Failed to parse Claude response as JSON: ${stdout.slice(0, 500)}`
+        [
+          "Failed to parse Claude response as JSON",
+          `source=${source}`,
+          `stdout_len=${stdout.length}`,
+          `stderr_len=${stderr.length}`,
+          `stdout_head=${JSON.stringify(stdout.slice(0, 300))}`,
+          `stderr_head=${JSON.stringify(stderr.slice(0, 300))}`,
+        ].join("; "),
       );
     }
 
@@ -230,4 +221,44 @@ export async function sendToClaude(
     clearTimeout(timeout);
     throw error;
   }
+}
+
+async function runQueue(): Promise<void> {
+  if (queueWorkerRunning) {
+    return;
+  }
+
+  queueWorkerRunning = true;
+
+  try {
+    while (claudeQueue.length > 0) {
+      const job = claudeQueue.shift();
+      if (!job) {
+        continue;
+      }
+
+      try {
+        const result = await runClaudeCommand(job.message, job.config, job.options);
+        job.resolve(result);
+      } catch (error) {
+        job.reject(error);
+      }
+    }
+  } finally {
+    queueWorkerRunning = false;
+    if (claudeQueue.length > 0) {
+      void runQueue();
+    }
+  }
+}
+
+export async function sendToClaude(
+  message: string,
+  config: Config,
+  options?: SendToClaudeOptions,
+): Promise<ClaudeResponse> {
+  return new Promise<ClaudeResponse>((resolve, reject) => {
+    claudeQueue.push({ message, config, options, resolve, reject });
+    void runQueue();
+  });
 }

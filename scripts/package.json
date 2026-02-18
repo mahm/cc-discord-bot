@@ -4,16 +4,24 @@
   "description": "Discord Bot that bridges DMs to Claude Code CLI",
   "type": "module",
   "scripts": {
-    "start": "bun run main.ts",
-    "typecheck": "tsc --noEmit"
+    "start": "bun run src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src test",
+    "lint:fix": "biome check --write src test",
+    "lint:knip": "knip --config knip.jsonc",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run lint && bun run lint:knip && bun run test"
   },
   "dependencies": {
     "croner": "^9.0.0",
     "discord.js": "^14.18.0",
-    "dotenv": "^16.5.0"
+    "dotenv": "^16.5.0",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.3.11",
     "bun-types": "^1.3.9",
+    "knip": "^5.83.1",
     "typescript": "^5.9.3"
   }
 }

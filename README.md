@@ -54,6 +54,7 @@ Discord ユーザー ID の確認方法:
 ```bash
 bun install --cwd .claude/skills/cc-discord-bot/scripts
 bun run --cwd .claude/skills/cc-discord-bot/scripts typecheck
+bun run --cwd .claude/skills/cc-discord-bot/scripts check
 ```
 
 ### 5. Docker Sandbox の初期化（初回のみ）
@@ -72,10 +73,10 @@ docker sandbox run --workspace "$(pwd)" claude
 
 ```bash
 # フォアグラウンドで起動
-bun run .claude/skills/cc-discord-bot/scripts/main.ts
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts
 
 # tmux でバックグラウンド起動
-tmux new -d -s cc-discord-bot "bun run .claude/skills/cc-discord-bot/scripts/main.ts"
+tmux new -d -s cc-discord-bot "bun run .claude/skills/cc-discord-bot/scripts/src/main.ts"
 
 # セッションの確認・接続・停止
 tmux ls
@@ -88,7 +89,7 @@ tmux kill-session -t cc-discord-bot
 ### 常駐モード（デフォルト）
 
 ```bash
-bun run .claude/skills/cc-discord-bot/scripts/main.ts
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts
 ```
 
 DM の受信と Claude への転送を行います。`.claude/settings.bot.json` に定義したスケジュールも自動で実行されます。
@@ -96,13 +97,13 @@ DM の受信と Claude への転送を行います。`.claude/settings.bot.json`
 ### 単発 DM 送信
 
 ```bash
-bun run .claude/skills/cc-discord-bot/scripts/main.ts send <userId> "message"
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send <userId> "message"
 ```
 
 ### スケジュールの手動実行
 
 ```bash
-bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts schedule <name>
 ```
 
 ## スケジューラー
@@ -114,6 +115,7 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 ```json
 {
   "bypass-mode": true,
+  "claude_timeout_seconds": 1800,
   "schedules": [
     {
       "name": "morning-plan",
@@ -129,6 +131,7 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 | フィールド | 説明 |
 |-----------|------|
 | `bypass-mode` | `true` にすると Claude CLI に `--dangerously-skip-permissions` を付与する（任意） |
+| `claude_timeout_seconds` | Claude 実行のタイムアウト秒数（10〜7200）。未指定時は 1800 秒（30 分） |
 | `schedules[].name` | スケジュールの識別名。ログや手動実行時に使う |
 | `schedules[].cron` | cron 式（分 時 日 月 曜日） |
 | `schedules[].timezone` | タイムゾーン |
@@ -147,6 +150,7 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
 ```json
 {
   "bypass-mode": true,
+  "claude_timeout_seconds": 1800,
   "schedules": [
     {
       "name": "morning-plan",
@@ -167,6 +171,8 @@ bun run .claude/skills/cc-discord-bot/scripts/main.ts schedule <name>
   ]
 }
 ```
+
+Claude に渡す固定プロンプトは `scripts/src/prompts/` に配置します（`append-system-prompt.md`, `prompt-template.md`）。
 
 `HEARTBEAT.md` の例:
 

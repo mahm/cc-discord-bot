@@ -1,18 +1,10 @@
-import { mkdir, readdir, rm, stat, writeFile } from "fs/promises";
-import type { Dirent } from "fs";
-import path from "path";
+import type { Dirent } from "node:fs";
+import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 import type { Message } from "discord.js";
-import type { Config } from "./config";
+import type { Config } from "./config-adapter";
 
-const IMAGE_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".bmp",
-  ".svg",
-]);
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
 
 const PDF_EXTENSIONS = new Set([".pdf"]);
 
@@ -76,19 +68,14 @@ function isAllowedAttachmentType(contentType: string, name: string): boolean {
   return false;
 }
 
-async function downloadAttachment(
-  url: string,
-  timeoutMs: number
-): Promise<Buffer> {
+async function downloadAttachment(url: string, timeoutMs: number): Promise<Buffer> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) {
-      throw new AttachmentError(
-        `Failed to download attachment (HTTP ${response.status})`
-      );
+      throw new AttachmentError(`Failed to download attachment (HTTP ${response.status})`);
     }
 
     const arrayBuffer = await response.arrayBuffer();
@@ -108,20 +95,17 @@ async function downloadAttachment(
 
 export async function collectMessageAttachments(
   message: Message,
-  config: Config
+  config: Config,
 ): Promise<AttachmentInput[]> {
   const attachments = Array.from(message.attachments.values());
   if (attachments.length === 0) {
     return [];
   }
 
-  const declaredTotalBytes = attachments.reduce(
-    (sum, attachment) => sum + attachment.size,
-    0
-  );
+  const declaredTotalBytes = attachments.reduce((sum, attachment) => sum + attachment.size, 0);
   if (declaredTotalBytes > config.maxAttachmentBytesPerMessage) {
     throw new AttachmentError(
-      `Attachment total size exceeds limit (${config.maxAttachmentBytesPerMessage} bytes)`
+      `Attachment total size exceeds limit (${config.maxAttachmentBytesPerMessage} bytes)`,
     );
   }
 
@@ -137,39 +121,31 @@ export async function collectMessageAttachments(
       const contentType = inferContentType(attachment.contentType, originalName);
 
       if (!isAllowedAttachmentType(contentType, originalName)) {
-        throw new AttachmentError(
-          `Unsupported attachment type: ${originalName} (${contentType})`
-        );
+        throw new AttachmentError(`Unsupported attachment type: ${originalName} (${contentType})`);
       }
 
       if (attachment.size > config.maxAttachmentBytesPerFile) {
         throw new AttachmentError(
-          `Attachment is too large: ${originalName} (${attachment.size} bytes)`
+          `Attachment is too large: ${originalName} (${attachment.size} bytes)`,
         );
       }
 
-      const binary = await downloadAttachment(
-        attachment.url,
-        config.attachmentDownloadTimeoutMs
-      );
+      const binary = await downloadAttachment(attachment.url, config.attachmentDownloadTimeoutMs);
       if (binary.length > config.maxAttachmentBytesPerFile) {
         throw new AttachmentError(
-          `Attachment is too large after download: ${originalName} (${binary.length} bytes)`
+          `Attachment is too large after download: ${originalName} (${binary.length} bytes)`,
         );
       }
 
       downloadedTotalBytes += binary.length;
       if (downloadedTotalBytes > config.maxAttachmentBytesPerMessage) {
         throw new AttachmentError(
-          `Attachment total size exceeds limit (${config.maxAttachmentBytesPerMessage} bytes)`
+          `Attachment total size exceeds limit (${config.maxAttachmentBytesPerMessage} bytes)`,
         );
       }
 
       const safeName = sanitizeFilename(originalName, index);
-      const filePath = path.join(
-        messageDir,
-        `${String(index + 1).padStart(2, "0")}-${safeName}`
-      );
+      const filePath = path.join(messageDir, `${String(index + 1).padStart(2, "0")}-${safeName}`);
       await writeFile(filePath, binary);
 
       result.push({
@@ -196,7 +172,7 @@ export function buildAttachmentPromptBlock(attachments: AttachmentInput[]): stri
     "添付ファイル情報:",
     ...attachments.map(
       (attachment, index) =>
-        `${index + 1}. name=${attachment.name} type=${attachment.contentType} size=${attachment.size} path=${attachment.path}`
+        `${index + 1}. name=${attachment.name} type=${attachment.contentType} size=${attachment.size} path=${attachment.path}`,
     ),
     "必要に応じて上記 path のファイルを読んで内容を反映してください。",
   ];

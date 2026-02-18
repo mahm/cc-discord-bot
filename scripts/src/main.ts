@@ -1,14 +1,14 @@
-import { loadConfig } from "./config";
-import { createBot } from "./bot";
-import { loadBotSettings, startScheduler, runScheduleByName } from "./scheduler";
 import { Client, GatewayIntentBits } from "discord.js";
+import { applyBotSettingsToConfig, loadConfig } from "./adapters/config-adapter";
+import { createBot } from "./adapters/discord-adapter";
+import { loadBotSettings, runScheduleByName, startScheduler } from "./adapters/scheduler-adapter";
 
 const config = loadConfig();
 
 const subcommand = process.argv[2];
 
 if (subcommand === "send") {
-  // DM送信モード: bun run main.ts send <userId> "message"
+  // DM送信モード: bun run src/main.ts send <userId> "message"
   const userId = process.argv[3];
   const message = process.argv.slice(4).join(" ");
 
@@ -33,7 +33,7 @@ if (subcommand === "send") {
     }
   });
 } else if (subcommand === "schedule") {
-  // 手動実行モード: bun run main.ts schedule <name>
+  // 手動実行モード: bun run src/main.ts schedule <name>
   const name = process.argv[3];
 
   if (!name) {
@@ -43,6 +43,7 @@ if (subcommand === "send") {
 
   try {
     const settings = await loadBotSettings(config);
+    applyBotSettingsToConfig(config, settings);
     const result = await runScheduleByName(name, settings, config);
     console.log(result);
   } catch (error) {
@@ -50,8 +51,9 @@ if (subcommand === "send") {
     process.exit(1);
   }
 } else {
-  // Bot常駐モード(デフォルト): bun run main.ts
+  // Bot常駐モード(デフォルト): bun run src/main.ts
   const settings = await loadBotSettings(config);
+  applyBotSettingsToConfig(config, settings);
   const client = createBot(config, {
     bypassMode: settings["bypass-mode"],
   });
@@ -70,6 +72,7 @@ if (subcommand === "send") {
     console.log(`Allowed users: ${config.allowedUserIds.join(", ")}`);
     console.log(`Project root: ${config.projectRoot}`);
     console.log(`Bypass mode: ${settings["bypass-mode"] ?? false}`);
+    console.log(`Claude timeout (seconds): ${settings.claude_timeout_seconds}`);
 
     // Start scheduler
     startScheduler(settings, config, client);
