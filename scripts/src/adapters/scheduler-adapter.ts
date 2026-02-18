@@ -3,12 +3,7 @@ import path from "node:path";
 import { Cron } from "croner";
 import type { Client, User } from "discord.js";
 import { type BotSettings, parseBotSettings } from "../core/bot-settings";
-import { runWithEmptyResponseRetry } from "../core/claude-retry";
-import {
-  EMPTY_RESPONSE_FALLBACK_MESSAGE,
-  isSkipResponse,
-  sendChunksWithFallback,
-} from "../core/message-format";
+import { isSkipResponse, splitMessage } from "../core/message-format";
 import { sendToClaude } from "./claude-adapter";
 import type { Config } from "./config-adapter";
 
@@ -41,13 +36,18 @@ async function sendDiscordDM(
   userId: string,
   text: string,
   context: string,
-): Promise<void> {
+): Promise<number> {
+  const chunks = splitMessage(text).filter((chunk) => chunk.trim().length > 0);
+  if (chunks.length === 0) {
+    console.log(`[scheduler] Discord notification suppressed (reason=empty-response, ${context})`);
+    return 0;
+  }
+
   const user: User = await client.users.fetch(userId);
-  await sendChunksWithFallback((chunk) => user.send(chunk), text, {
-    fallbackMessage: EMPTY_RESPONSE_FALLBACK_MESSAGE,
-    source: "scheduler",
-    context,
-  });
+  for (const chunk of chunks) {
+    await user.send(chunk);
+  }
+  return chunks.length;
 }
 
 async function runSchedule(
@@ -61,20 +61,13 @@ async function runSchedule(
 
   try {
     const prompt = await buildPrompt(schedule, config);
-    const { result, attempts } = await runWithEmptyResponseRetry(
-      async () =>
-        await sendToClaude(prompt, config, {
-          bypassMode: settings["bypass-mode"],
-          source: "scheduler",
-        }),
-      {
-        source: "scheduler",
-        context: `schedule=${schedule.name}`,
-      },
-    );
+    const result = await sendToClaude(prompt, config, {
+      bypassMode: settings["bypass-mode"],
+      source: "scheduler",
+    });
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(
-      `[scheduler] Schedule "${schedule.name}" completed in ${elapsed}s (${result.response.length} chars, session: ${result.sessionId}, attempts=${attempts})`,
+      `[scheduler] Schedule "${schedule.name}" completed in ${elapsed}s (${result.response.length} chars, session: ${result.sessionId})`,
     );
 
     if (schedule.skippable && isSkipResponse(result.response)) {
@@ -86,29 +79,23 @@ async function runSchedule(
 
     if (schedule.discord_notify && client) {
       const targetUserId = config.allowedUserIds[0];
-      await sendDiscordDM(
+      const sentChunks = await sendDiscordDM(
         client,
         targetUserId,
         result.response,
         `schedule=${schedule.name},user=${targetUserId}`,
       );
-      console.log(`[scheduler] DM sent to ${targetUserId} for "${schedule.name}"`);
+      if (sentChunks > 0) {
+        console.log(
+          `[scheduler] DM sent to ${targetUserId} for "${schedule.name}" (chunks=${sentChunks})`,
+        );
+      }
     }
 
     return result.response;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[scheduler] Schedule "${schedule.name}" failed: ${errorMsg}`);
-
-    if (schedule.discord_notify && client) {
-      const targetUserId = config.allowedUserIds[0];
-      await sendDiscordDM(
-        client,
-        targetUserId,
-        `[Schedule Error] ${schedule.name}: ${errorMsg.slice(0, 1800)}`,
-        `schedule=${schedule.name},user=${targetUserId},error=true`,
-      ).catch((e) => console.error(`[scheduler] Failed to send error DM: ${e}`));
-    }
 
     throw error;
   }
