@@ -164,13 +164,6 @@ export function createBot(config: Config, options?: BotOptions): Client {
 
     queue.push(message);
 
-    if (workerRunning) {
-      const channel = message.channel as DMChannel;
-      await channel
-        .send("Queued your message. It will be processed after the current task.")
-        .catch(() => {});
-    }
-
     void runQueue().catch((error) => {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[queue] Unexpected queue failure: ${errorMessage}`);
