@@ -11,6 +11,8 @@ description: Claude CodeをDiscord Bot化するスキル。Discord DM経由で�
 
 ```bash
 bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send <ユーザーID> "メッセージ内容"
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send <ユーザーID> --file <ファイルパス>
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send <ユーザーID> --file <ファイルパス1> --file <ファイルパス2> "メッセージ内容"
 ```
 
 ## Bot常駐

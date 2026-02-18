@@ -2,18 +2,19 @@ import { Client, GatewayIntentBits } from "discord.js";
 import { applyBotSettingsToConfig, loadConfig } from "./adapters/config-adapter";
 import { createBot } from "./adapters/discord-adapter";
 import { loadBotSettings, runScheduleByName, startScheduler } from "./adapters/scheduler-adapter";
+import { prepareDmFiles } from "./adapters/send-dm-adapter";
+import { parseSendCommandArgs, SEND_USAGE } from "./core/send-command";
 
 const config = loadConfig();
 
 const subcommand = process.argv[2];
 
 if (subcommand === "send") {
-  // DM送信モード: bun run src/main.ts send <userId> "message"
-  const userId = process.argv[3];
-  const message = process.argv.slice(4).join(" ");
-
-  if (!userId || !message) {
-    console.error("Usage: bun run main.ts send <userId> <message>");
+  // DM送信モード: bun run src/main.ts send <userId> [--file <path>]... [message]
+  const parsed = parseSendCommandArgs(process.argv.slice(3));
+  if (!parsed.ok) {
+    console.error(parsed.error);
+    console.error(parsed.usage);
     process.exit(1);
   }
 
@@ -22,11 +23,24 @@ if (subcommand === "send") {
 
   client.on("clientReady", async () => {
     try {
-      const user = await client.users.fetch(userId);
-      await user.send(message);
-      console.log(`DM sent to ${user.tag}`);
+      const preparedFiles = await prepareDmFiles(parsed.value.filePaths, config.projectRoot);
+
+      const user = await client.users.fetch(parsed.value.userId);
+      await user.send({
+        ...(parsed.value.message ? { content: parsed.value.message } : {}),
+        ...(preparedFiles.length > 0
+          ? {
+              files: preparedFiles.map((file) => ({
+                attachment: file.resolvedPath,
+                name: file.fileName,
+              })),
+            }
+          : {}),
+      });
+      console.log(`DM sent to ${user.tag} (files=${preparedFiles.length})`);
     } catch (error) {
       console.error(`Failed to send DM: ${error}`);
+      console.error(SEND_USAGE);
       process.exit(1);
     } finally {
       client.destroy();

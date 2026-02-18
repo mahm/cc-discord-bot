@@ -98,7 +98,12 @@ DM の受信と Claude への転送を行います。`.claude/settings.bot.json`
 
 ```bash
 bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send <userId> "message"
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send <userId> --file <path>
+bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send <userId> --file <path1> --file <path2> "message"
 ```
+
+`--file` は複数指定できます。メッセージ本文は任意です。  
+添付ファイルはプロジェクトルート配下の実ファイルのみ送信可能で、1ファイルあたり 25MB を超える場合は送信前にエラーになります。
 
 ### スケジュールの手動実行
 
