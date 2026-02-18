@@ -14,6 +14,8 @@ const scheduleSchema = z
   })
   .strict();
 
+const envKeySchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid env key format");
+
 const botSettingsSchema = z
   .object({
     "bypass-mode": z.boolean().optional(),
@@ -23,6 +25,7 @@ const botSettingsSchema = z
       .min(10)
       .max(7200)
       .default(BOT_SETTINGS_DEFAULT_TIMEOUT_SECONDS),
+    env: z.record(envKeySchema, z.string()).default({}),
     schedules: z.array(scheduleSchema).default([]),
   })
   .strict();

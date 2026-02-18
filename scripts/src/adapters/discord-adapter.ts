@@ -63,6 +63,7 @@ async function processQueuedMessage(
       bypassMode: options?.bypassMode,
       attachments,
       source: "dm",
+      authorId: message.author.id,
     });
 
     await sendChunksWithFallback((chunk) => channel.send(chunk), result.response, {

@@ -35,6 +35,7 @@ export interface Config {
   sessionFile: string;
   sessionDir: string;
   claudeTimeout: number;
+  claudeEnv: Record<string, string>;
   attachmentRootDir: string;
   maxAttachmentBytesPerFile: number;
   maxAttachmentBytesPerMessage: number;
@@ -77,6 +78,7 @@ export function loadConfig(): Config {
     sessionFile: SESSION_FILE,
     sessionDir: SESSION_DIR,
     claudeTimeout: DEFAULT_CLAUDE_TIMEOUT_MS,
+    claudeEnv: {},
     attachmentRootDir: ATTACHMENT_ROOT_DIR,
     maxAttachmentBytesPerFile: MAX_ATTACHMENT_BYTES_PER_FILE,
     maxAttachmentBytesPerMessage: MAX_ATTACHMENT_BYTES_PER_MESSAGE,
@@ -87,4 +89,5 @@ export function loadConfig(): Config {
 
 export function applyBotSettingsToConfig(config: Config, settings: BotSettings): void {
   config.claudeTimeout = settings.claude_timeout_seconds * 1000;
+  config.claudeEnv = settings.env;
 }

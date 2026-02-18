@@ -1,5 +1,4 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { type AttachmentInput, buildAttachmentPromptBlock } from "./attachments-adapter";
 import type { Config } from "./config-adapter";
 
@@ -12,6 +11,7 @@ export interface SendToClaudeOptions {
   bypassMode?: boolean;
   attachments?: AttachmentInput[];
   source?: "dm" | "scheduler" | "manual";
+  authorId?: string;
 }
 
 interface ClaudeJob {
@@ -24,6 +24,94 @@ interface ClaudeJob {
 
 const claudeQueue: ClaudeJob[] = [];
 let queueWorkerRunning = false;
+const DISCORD_USER_ID_PATTERN = /^\d{17,20}$/;
+const FIXED_CLAUDE_ENV_KEYS = ["FORCE_COLOR", "CLAUDECODE"] as const;
+
+export function buildProgressHint(
+  source: SendToClaudeOptions["source"] | undefined,
+  authorId: string | undefined,
+): string {
+  if (source !== "dm" || !authorId || !DISCORD_USER_ID_PATTERN.test(authorId)) {
+    return "";
+  }
+
+  return [
+    "処理が長くなる場合は、途中経過を先にDiscord DMで1-2文だけ送ってください。",
+    `進捗DM送信コマンド: bun run .claude/skills/cc-discord-bot/scripts/src/main.ts send ${authorId} "<途中経過メッセージ>"`,
+  ].join("\n");
+}
+
+export function renderPromptTemplate(
+  template: string,
+  input: {
+    datetime: string;
+    source: string;
+    assistantContext: string;
+    userInput: string;
+  },
+): string {
+  return template
+    .replace("{{datetime}}", input.datetime)
+    .replace("{{source}}", input.source)
+    .replace("{{assistant_context}}", input.assistantContext)
+    .replace("{{user_input}}", input.userInput);
+}
+
+export function buildClaudeCliArgs(input: {
+  appendSystemPromptPath: string;
+  bypassMode?: boolean;
+  sessionId?: string | null;
+  prompt: string;
+}): string[] {
+  const args = [
+    "-p",
+    "--output-format",
+    "json",
+    "--append-system-prompt-file",
+    input.appendSystemPromptPath,
+  ];
+
+  if (input.bypassMode) {
+    args.push("--dangerously-skip-permissions");
+  }
+  if (input.sessionId) {
+    args.push("--resume", input.sessionId);
+  }
+
+  // Ensure prompt text is treated as a positional argument even when it starts with '-'.
+  args.push("--", input.prompt);
+  return args;
+}
+
+export function buildDockerExecEnvArgs(input: { extraEnv: Record<string, string> }): {
+  args: string[];
+  envKeys: string[];
+  ignoredKeys: string[];
+} {
+  const fixedEnv: Record<(typeof FIXED_CLAUDE_ENV_KEYS)[number], string> = {
+    FORCE_COLOR: "0",
+    CLAUDECODE: "",
+  };
+  const args: string[] = [];
+  const envKeys: string[] = [...FIXED_CLAUDE_ENV_KEYS];
+  const ignoredKeys: string[] = [];
+
+  for (const key of FIXED_CLAUDE_ENV_KEYS) {
+    args.push("-e", `${key}=${fixedEnv[key]}`);
+  }
+
+  const extraEntries = Object.entries(input.extraEnv).sort(([a], [b]) => a.localeCompare(b));
+  for (const [key, value] of extraEntries) {
+    if (Object.hasOwn(fixedEnv, key)) {
+      ignoredKeys.push(key);
+      continue;
+    }
+    args.push("-e", `${key}=${value}`);
+    envKeys.push(key);
+  }
+
+  return { args, envKeys, ignoredKeys };
+}
 
 async function readSessionId(config: Config): Promise<string | null> {
   try {
@@ -105,57 +193,56 @@ async function runClaudeCommand(
 
   const attachmentBlock = buildAttachmentPromptBlock(options?.attachments ?? []);
   const trimmedMessage = message.trim();
-  const promptMessageParts: string[] = [];
-  if (trimmedMessage) {
-    promptMessageParts.push(trimmedMessage);
+  const progressHint = buildProgressHint(options?.source, options?.authorId);
+  const userInput = trimmedMessage || "(No text message was provided.)";
+  const assistantContextParts: string[] = [];
+  if (progressHint) {
+    assistantContextParts.push(progressHint);
   }
   if (attachmentBlock) {
-    promptMessageParts.push(attachmentBlock);
+    assistantContextParts.push(attachmentBlock);
   }
-  if (promptMessageParts.length === 0) {
-    promptMessageParts.push("(No text message was provided.)");
-  }
-  const promptMessage = promptMessageParts.join("\n\n");
+  const assistantContext = assistantContextParts.join("\n\n") || "(No supplemental context)";
 
   const template = await readFile(config.promptTemplatePath, "utf-8");
-  const prompt = template.replace("{{datetime}}", timeStr).replace("{{message}}", promptMessage);
+  const source = options?.source ?? "unknown";
+  const prompt = renderPromptTemplate(template, {
+    datetime: timeStr,
+    source,
+    assistantContext,
+    userInput,
+  });
 
-  const args = [
-    "-p",
-    "--output-format",
-    "json",
-    "--append-system-prompt-file",
-    config.appendSystemPromptPath,
-  ];
-  if (options?.bypassMode) {
-    args.push("--dangerously-skip-permissions");
-  }
-  if (sessionId) {
-    args.push("--resume", sessionId);
-  }
-  args.push(prompt);
+  const args = buildClaudeCliArgs({
+    appendSystemPromptPath: config.appendSystemPromptPath,
+    bypassMode: options?.bypassMode,
+    sessionId,
+    prompt,
+  });
 
   const sandboxId = await ensureClaudeSandbox(config);
-  const sandboxConfigDir = path.join(config.projectRoot, ".config");
+  const dockerEnv = buildDockerExecEnvArgs({
+    extraEnv: config.claudeEnv,
+  });
   const dockerExecArgs = [
     "exec",
     "-w",
     config.projectRoot,
-    "-e",
-    "FORCE_COLOR=0",
-    "-e",
-    "CLAUDECODE=",
-    "-e",
-    `MAH_TODO_CONFIG_DIR=${sandboxConfigDir}`,
+    ...dockerEnv.args,
     sandboxId,
     "claude",
     ...args,
   ];
 
-  const source = options?.source ?? "unknown";
+  if (dockerEnv.ignoredKeys.length > 0) {
+    console.warn(
+      `[claude] Ignored env keys from settings.bot.json because they are reserved: ${dockerEnv.ignoredKeys.join(", ")}`,
+    );
+  }
+
   const logArgs = args.map((a, i) => (i === args.length - 1 ? `${a.slice(0, 100)}...` : a));
   console.log(
-    `[claude] source=${source} $ docker exec -w ${config.projectRoot} -e FORCE_COLOR=0 -e CLAUDECODE= -e MAH_TODO_CONFIG_DIR=${sandboxConfigDir} ${sandboxId} claude ${logArgs.join(" ")}`,
+    `[claude] source=${source} env_keys=${dockerEnv.envKeys.join(",")} $ docker exec -w ${config.projectRoot} ${sandboxId} claude ${logArgs.join(" ")}`,
   );
 
   const proc = Bun.spawn(["docker", ...dockerExecArgs], {

@@ -116,6 +116,9 @@ bun run .claude/skills/cc-discord-bot/scripts/src/main.ts schedule <name>
 {
   "bypass-mode": true,
   "claude_timeout_seconds": 1800,
+  "env": {
+    "YOUR_ENV": "value"
+  },
   "schedules": [
     {
       "name": "morning-plan",
@@ -132,6 +135,7 @@ bun run .claude/skills/cc-discord-bot/scripts/src/main.ts schedule <name>
 |-----------|------|
 | `bypass-mode` | `true` にすると Claude CLI に `--dangerously-skip-permissions` を付与する（任意） |
 | `claude_timeout_seconds` | Claude 実行のタイムアウト秒数（10〜7200）。未指定時は 1800 秒（30 分） |
+| `env` | `docker exec` で Claude 実行時に追加する環境変数（文字列キー/文字列値）。`FORCE_COLOR` `CLAUDECODE` は予約済みで上書き不可 |
 | `schedules[].name` | スケジュールの識別名。ログや手動実行時に使う |
 | `schedules[].cron` | cron 式（分 時 日 月 曜日） |
 | `schedules[].timezone` | タイムゾーン |
@@ -221,6 +225,8 @@ Claude に渡す固定プロンプトは `scripts/src/prompts/` に配置しま�
 |----------|------|
 | `!reset` | セッションをクリアする |
 | `!session` | 現在のセッション ID を表示する |
+
+長時間処理になる場合、Claude Codeは処理中に途中経過DMを先に送ることがあります。  
 
 ### 添付ファイル
 

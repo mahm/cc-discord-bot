@@ -48,4 +48,24 @@ describe("config-adapter", () => {
 
     expect(config.claudeTimeout).toBe(120 * 1000);
   });
+
+  it("applies extra claude env from bot settings", () => {
+    const config = loadConfig();
+    const settings = parseBotSettings(
+      JSON.stringify({
+        env: {
+          CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+          OTEL_METRICS_EXPORTER: "otlp",
+        },
+        schedules: [],
+      }),
+    );
+
+    applyBotSettingsToConfig(config, settings);
+
+    expect(config.claudeEnv).toEqual({
+      CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+      OTEL_METRICS_EXPORTER: "otlp",
+    });
+  });
 });

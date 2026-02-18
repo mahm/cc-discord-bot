@@ -1,3 +1,13 @@
-[現在時刻: {{datetime}}]
+---
+channel: cc-discord-bot
+source: {{source}}
+datetime: "{{datetime}}"
+---
 
-{{message}}
+# System Assist
+
+{{assistant_context}}
+
+# User Input
+
+{{user_input}}
