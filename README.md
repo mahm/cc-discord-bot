@@ -145,11 +145,11 @@ bun run .claude/skills/cc-discord-bot/scripts/src/main.ts schedule <name>
 | `schedules[].cron` | cron 式（分 時 日 月 曜日） |
 | `schedules[].timezone` | タイムゾーン |
 | `schedules[].prompt` | Claude に送るプロンプト。`{{datetime}}` で現在日時に置換される |
-| `schedules[].discord_notify` | 結果を Discord DM で通知するかどうか |
+| `schedules[].discord_notify` | 結果を Discord DM で通知するかどうか（接続済みかつ非空応答の場合のみ送信） |
 | `schedules[].prompt_file` | ファイルの内容を `prompt` の前に結合して送る。プロジェクトルートからの相対パス（任意） |
 | `schedules[].skippable` | Claude の応答が `[SKIP]` で始まる、または終わる場合に DM 通知を省略する（任意） |
 
-スケジュール実行では、空応答や実行エラー時に Discord へ通知しません（ログのみ出力）。
+スケジュール実行では、空応答や実行エラー時に Discord へ通知しません（ログのみ出力）。また、通知前に接続状態を確認し、未接続なら短時間待機して回復しない場合は通知をスキップします。
 
 ### HEARTBEAT の運用例
 
@@ -261,3 +261,5 @@ DM にファイルを添付して送ることができます。
 | Claude の実行でエラーになる | `docker sandbox ls` で Sandbox の状態を確認。`Not logged in` と出る場合は `docker sandbox run --workspace "$(pwd)" claude` で `/login` を実行 |
 | スケジュールが動かない | `.claude/settings.bot.json` の JSON 構文・cron 式・timezone を確認 |
 | セッションの挙動がおかしい | `!reset` でセッションを初期化 |
+
+Discord接続切れに対しては、自動再接続（指数バックオフ: 1秒→2秒→4秒…最大60秒）を継続します。`[discord-connection]` / `[scheduler]` ログを確認してください。

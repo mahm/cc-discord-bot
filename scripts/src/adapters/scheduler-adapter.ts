@@ -3,11 +3,17 @@ import path from "node:path";
 import { Cron } from "croner";
 import type { Client, User } from "discord.js";
 import { type BotSettings, parseBotSettings } from "../core/bot-settings";
-import { isSkipResponse, splitMessage } from "../core/message-format";
+import {
+  DEFAULT_WAIT_READY_TIMEOUT_MS,
+  type DiscordConnectionManager,
+} from "../core/discord-connection";
+import { isSkipResponse, splitMessage, stripThinkTags } from "../core/message-format";
 import { sendToClaude } from "./claude-adapter";
 import type { Config } from "./config-adapter";
 
 type Schedule = BotSettings["schedules"][number];
+
+type ConnectionGuard = Pick<DiscordConnectionManager, "isReady" | "waitUntilReady">;
 
 export async function loadBotSettings(config: Config): Promise<BotSettings> {
   const settingsPath = path.join(config.projectRoot, ".claude", "settings.bot.json");
@@ -50,11 +56,38 @@ async function sendDiscordDM(
   return chunks.length;
 }
 
+async function ensureConnectedForSchedulerNotification(
+  connectionGuard: ConnectionGuard | undefined,
+  scheduleName: string,
+): Promise<boolean> {
+  if (!connectionGuard) {
+    return true;
+  }
+
+  if (connectionGuard.isReady()) {
+    return true;
+  }
+
+  console.log(
+    `[scheduler] Waiting for Discord reconnect before notify (schedule=${scheduleName}, timeout_ms=${DEFAULT_WAIT_READY_TIMEOUT_MS})`,
+  );
+  const ready = await connectionGuard.waitUntilReady(DEFAULT_WAIT_READY_TIMEOUT_MS);
+  if (!ready) {
+    console.warn(
+      `[scheduler] Discord notification suppressed (reason=not-connected, schedule=${scheduleName})`,
+    );
+    return false;
+  }
+
+  return true;
+}
+
 async function runSchedule(
   schedule: Schedule,
   settings: BotSettings,
   config: Config,
   client?: Client,
+  connectionGuard?: ConnectionGuard,
 ): Promise<string> {
   console.log(`[scheduler] Running schedule: ${schedule.name}`);
   const startTime = Date.now();
@@ -70,19 +103,29 @@ async function runSchedule(
       `[scheduler] Schedule "${schedule.name}" completed in ${elapsed}s (${result.response.length} chars, session: ${result.sessionId})`,
     );
 
-    if (schedule.skippable && isSkipResponse(result.response)) {
+    const cleaned = stripThinkTags(result.response);
+
+    if (schedule.skippable && isSkipResponse(cleaned)) {
       console.log(
         `[scheduler] Schedule "${schedule.name}" skipped (reason=skip-token-at-start-or-end)`,
       );
-      return result.response;
+      return cleaned;
     }
 
     if (schedule.discord_notify && client) {
+      const canNotify = await ensureConnectedForSchedulerNotification(
+        connectionGuard,
+        schedule.name,
+      );
+      if (!canNotify) {
+        return cleaned;
+      }
+
       const targetUserId = config.allowedUserIds[0];
       const sentChunks = await sendDiscordDM(
         client,
         targetUserId,
-        result.response,
+        cleaned,
         `schedule=${schedule.name},user=${targetUserId}`,
       );
       if (sentChunks > 0) {
@@ -92,7 +135,7 @@ async function runSchedule(
       }
     }
 
-    return result.response;
+    return cleaned;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[scheduler] Schedule "${schedule.name}" failed: ${errorMsg}`);
@@ -101,7 +144,12 @@ async function runSchedule(
   }
 }
 
-export function startScheduler(settings: BotSettings, config: Config, client: Client): void {
+export function startScheduler(
+  settings: BotSettings,
+  config: Config,
+  client: Client,
+  connectionGuard?: ConnectionGuard,
+): void {
   if (settings.schedules.length === 0) {
     console.log("[scheduler] No schedules configured");
     return;
@@ -109,7 +157,7 @@ export function startScheduler(settings: BotSettings, config: Config, client: Cl
 
   for (const schedule of settings.schedules) {
     const job = new Cron(schedule.cron, { timezone: schedule.timezone }, () => {
-      runSchedule(schedule, settings, config, client).catch(() => {
+      runSchedule(schedule, settings, config, client, connectionGuard).catch(() => {
         // Error already logged in runSchedule
       });
     });
@@ -128,6 +176,8 @@ export async function runScheduleByName(
   name: string,
   settings: BotSettings,
   config: Config,
+  client?: Client,
+  connectionGuard?: ConnectionGuard,
 ): Promise<string> {
   const schedule = settings.schedules.find((s) => s.name === name);
   if (!schedule) {
@@ -135,5 +185,5 @@ export async function runScheduleByName(
     throw new Error(`Schedule "${name}" not found. Available: ${available || "(none)"}`);
   }
 
-  return runSchedule(schedule, settings, config);
+  return runSchedule(schedule, settings, config, client, connectionGuard);
 }

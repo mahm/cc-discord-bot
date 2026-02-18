@@ -68,6 +68,10 @@ export async function sendChunksWithFallback(
   return chunks.length;
 }
 
+export function stripThinkTags(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+}
+
 export function isSkipResponse(text: string): boolean {
   const normalized = text.trim();
   return normalized.startsWith("[SKIP]") || normalized.endsWith("[SKIP]");

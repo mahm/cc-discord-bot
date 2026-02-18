@@ -3,6 +3,7 @@ import { applyBotSettingsToConfig, loadConfig } from "./adapters/config-adapter"
 import { createBot } from "./adapters/discord-adapter";
 import { loadBotSettings, runScheduleByName, startScheduler } from "./adapters/scheduler-adapter";
 import { prepareDmFiles } from "./adapters/send-dm-adapter";
+import { createDiscordConnectionManager } from "./core/discord-connection";
 import { parseSendCommandArgs, SEND_USAGE } from "./core/send-command";
 
 const config = loadConfig();
@@ -71,24 +72,34 @@ if (subcommand === "send") {
   const client = createBot(config, {
     bypassMode: settings["bypass-mode"],
   });
+  const connection = createDiscordConnectionManager(client, config.discordBotToken);
+  let shuttingDown = false;
 
-  function shutdown() {
-    console.log("Shutting down...");
-    client.destroy();
+  async function shutdown(signal: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    console.log(`Shutting down... (signal=${signal})`);
+    await connection.stop();
     process.exit(0);
   }
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  client.login(config.discordBotToken).then(async () => {
-    console.log("Discord daemon started");
-    console.log(`Allowed users: ${config.allowedUserIds.join(", ")}`);
-    console.log(`Project root: ${config.projectRoot}`);
-    console.log(`Bypass mode: ${settings["bypass-mode"] ?? false}`);
-    console.log(`Claude timeout (seconds): ${settings.claude_timeout_seconds}`);
-
-    // Start scheduler
-    startScheduler(settings, config, client);
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
   });
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+
+  await connection.start();
+
+  console.log("Discord daemon started");
+  console.log(`Allowed users: ${config.allowedUserIds.join(", ")}`);
+  console.log(`Project root: ${config.projectRoot}`);
+  console.log(`Bypass mode: ${settings["bypass-mode"] ?? false}`);
+  console.log(`Claude timeout (seconds): ${settings.claude_timeout_seconds}`);
+  console.log(`Discord connected: ${connection.isReady()}`);
+
+  // Start scheduler
+  startScheduler(settings, config, client, connection);
 }
