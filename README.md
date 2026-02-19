@@ -121,6 +121,9 @@ bun run .claude/skills/cc-discord-bot/scripts/src/main.ts schedule <name>
 {
   "bypass-mode": true,
   "claude_timeout_seconds": 1800,
+  "discord_connection_heartbeat_interval_seconds": 60,
+  "discord_connection_stale_threshold_seconds": 180,
+  "discord_connection_reconnect_grace_seconds": 20,
   "env": {
     "YOUR_ENV": "value"
   },
@@ -140,6 +143,9 @@ bun run .claude/skills/cc-discord-bot/scripts/src/main.ts schedule <name>
 |-----------|------|
 | `bypass-mode` | `true` にすると Claude CLI に `--dangerously-skip-permissions` を付与する（任意） |
 | `claude_timeout_seconds` | Claude 実行のタイムアウト秒数（10〜7200）。未指定時は 1800 秒（30 分） |
+| `discord_connection_heartbeat_interval_seconds` | 接続heartbeat間隔（10〜300秒）。未指定時は60秒 |
+| `discord_connection_stale_threshold_seconds` | Gatewayイベントが来ない状態を異常とみなす閾値（30〜900秒）。未指定時は180秒 |
+| `discord_connection_reconnect_grace_seconds` | 再接続後に `ready` になるまでの待機時間（5〜120秒）。未指定時は20秒 |
 | `env` | `docker exec` で Claude 実行時に追加する環境変数（文字列キー/文字列値）。`FORCE_COLOR` `CLAUDECODE` は予約済みで上書き不可 |
 | `schedules[].name` | スケジュールの識別名。ログや手動実行時に使う |
 | `schedules[].cron` | cron 式（分 時 日 月 曜日） |
@@ -150,6 +156,7 @@ bun run .claude/skills/cc-discord-bot/scripts/src/main.ts schedule <name>
 | `schedules[].skippable` | Claude の応答が `[SKIP]` で始まる、または終わる場合に DM 通知を省略する（任意） |
 
 スケジュール実行では、空応答や実行エラー時に Discord へ通知しません（ログのみ出力）。また、通知前に接続状態を確認し、未接続なら短時間待機して回復しない場合は通知をスキップします。
+接続維持は scheduler ではなく専用タイマーで行われ、1分ごと（設定可能）に接続ヘルスを監視して異常時は強制再接続します。
 
 ### HEARTBEAT の運用例
 
@@ -262,4 +269,4 @@ DM にファイルを添付して送ることができます。
 | スケジュールが動かない | `.claude/settings.bot.json` の JSON 構文・cron 式・timezone を確認 |
 | セッションの挙動がおかしい | `!reset` でセッションを初期化 |
 
-Discord接続切れに対しては、自動再接続（指数バックオフ: 1秒→2秒→4秒…最大60秒）を継続します。`[discord-connection]` / `[scheduler]` ログを確認してください。
+Discord接続切れに対しては、自動再接続（指数バックオフ: 1秒→2秒→4秒…最大60秒）を継続します。さらに専用heartbeatが `not_ready` / `stale gateway` / 連続高ping を検知した場合は強制再接続を実行します。`[discord-connection]` / `[scheduler]` ログを確認してください。

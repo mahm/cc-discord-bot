@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 export const BOT_SETTINGS_DEFAULT_TIMEOUT_SECONDS = 1800;
+export const DISCORD_CONNECTION_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60;
+export const DISCORD_CONNECTION_DEFAULT_STALE_THRESHOLD_SECONDS = 180;
+export const DISCORD_CONNECTION_DEFAULT_RECONNECT_GRACE_SECONDS = 20;
 
 const scheduleSchema = z
   .object({
@@ -25,6 +28,24 @@ const botSettingsSchema = z
       .min(10)
       .max(7200)
       .default(BOT_SETTINGS_DEFAULT_TIMEOUT_SECONDS),
+    discord_connection_heartbeat_interval_seconds: z
+      .number()
+      .int()
+      .min(10)
+      .max(300)
+      .default(DISCORD_CONNECTION_DEFAULT_HEARTBEAT_INTERVAL_SECONDS),
+    discord_connection_stale_threshold_seconds: z
+      .number()
+      .int()
+      .min(30)
+      .max(900)
+      .default(DISCORD_CONNECTION_DEFAULT_STALE_THRESHOLD_SECONDS),
+    discord_connection_reconnect_grace_seconds: z
+      .number()
+      .int()
+      .min(5)
+      .max(120)
+      .default(DISCORD_CONNECTION_DEFAULT_RECONNECT_GRACE_SECONDS),
     env: z.record(envKeySchema, z.string()).default({}),
     schedules: z.array(scheduleSchema).default([]),
   })

@@ -9,11 +9,13 @@ import {
 class FakeClient extends EventEmitter {
   public ready = false;
   public loginCalls = 0;
-  public shouldAutoReady = true;
+  public destroyCalls = 0;
+  public autoReadyOnLogin = true;
+  public ws = { ping: 50 };
 
   async login(_token: string): Promise<string> {
     this.loginCalls += 1;
-    if (this.shouldAutoReady) {
+    if (this.autoReadyOnLogin) {
       this.ready = true;
       this.emit("clientReady");
     }
@@ -25,8 +27,15 @@ class FakeClient extends EventEmitter {
   }
 
   destroy(): void {
+    this.destroyCalls += 1;
     this.ready = false;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 describe("calculateReconnectDelayMs", () => {
@@ -43,7 +52,7 @@ describe("calculateReconnectDelayMs", () => {
 describe("createDiscordConnectionManager", () => {
   it("waitUntilReady returns true after ready event", async () => {
     const fake = new FakeClient();
-    fake.shouldAutoReady = false;
+    fake.autoReadyOnLogin = false;
     const manager = createDiscordConnectionManager(fake as unknown as Client, "token");
 
     await manager.start();
@@ -55,20 +64,22 @@ describe("createDiscordConnectionManager", () => {
     }, 10);
 
     await expect(waiting).resolves.toBe(true);
+    await manager.stop();
   });
 
   it("waitUntilReady returns false on timeout", async () => {
     const fake = new FakeClient();
-    fake.shouldAutoReady = false;
+    fake.autoReadyOnLogin = false;
     const manager = createDiscordConnectionManager(fake as unknown as Client, "token");
 
     await manager.start();
     await expect(manager.waitUntilReady(10)).resolves.toBe(false);
+    await manager.stop();
   });
 
   it("stop resolves pending waiters with false", async () => {
     const fake = new FakeClient();
-    fake.shouldAutoReady = false;
+    fake.autoReadyOnLogin = false;
     const manager = createDiscordConnectionManager(fake as unknown as Client, "token");
 
     await manager.start();
@@ -76,5 +87,63 @@ describe("createDiscordConnectionManager", () => {
     await manager.stop();
 
     await expect(waiting).resolves.toBe(false);
+  });
+
+  it("heartbeat triggers forced reconnect when ready state is lost", async () => {
+    const fake = new FakeClient();
+    const manager = createDiscordConnectionManager(fake as unknown as Client, "token", {
+      heartbeatIntervalMs: 10,
+      staleThresholdMs: 60_000,
+      reconnectGraceMs: 100,
+    });
+
+    await manager.start();
+    fake.ready = false;
+
+    await sleep(1200);
+
+    const state = manager.getState();
+    expect(state.forcedReconnects).toBeGreaterThanOrEqual(1);
+    expect(fake.loginCalls).toBeGreaterThanOrEqual(2);
+    expect(fake.destroyCalls).toBeGreaterThanOrEqual(1);
+    await manager.stop();
+  });
+
+  it("heartbeat triggers forced reconnect when gateway events become stale", async () => {
+    const fake = new FakeClient();
+    const manager = createDiscordConnectionManager(fake as unknown as Client, "token", {
+      heartbeatIntervalMs: 10,
+      staleThresholdMs: 30,
+      reconnectGraceMs: 100,
+    });
+
+    await manager.start();
+
+    await sleep(1200);
+
+    const state = manager.getState();
+    expect(state.forcedReconnects).toBeGreaterThanOrEqual(1);
+    expect(fake.destroyCalls).toBeGreaterThanOrEqual(1);
+    await manager.stop();
+  });
+
+  it("heartbeat triggers forced reconnect on consecutive high ping", async () => {
+    const fake = new FakeClient();
+    fake.ws.ping = 20_000;
+
+    const manager = createDiscordConnectionManager(fake as unknown as Client, "token", {
+      heartbeatIntervalMs: 10,
+      staleThresholdMs: 60_000,
+      reconnectGraceMs: 100,
+    });
+
+    await manager.start();
+
+    await sleep(1200);
+
+    const state = manager.getState();
+    expect(state.forcedReconnects).toBeGreaterThanOrEqual(1);
+    expect(fake.destroyCalls).toBeGreaterThanOrEqual(1);
+    await manager.stop();
   });
 });

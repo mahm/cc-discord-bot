@@ -72,7 +72,14 @@ if (subcommand === "send") {
   const client = createBot(config, {
     bypassMode: settings["bypass-mode"],
   });
-  const connection = createDiscordConnectionManager(client, config.discordBotToken);
+  const heartbeatIntervalMs = settings.discord_connection_heartbeat_interval_seconds * 1000;
+  const staleThresholdMs = settings.discord_connection_stale_threshold_seconds * 1000;
+  const reconnectGraceMs = settings.discord_connection_reconnect_grace_seconds * 1000;
+  const connection = createDiscordConnectionManager(client, config.discordBotToken, {
+    heartbeatIntervalMs,
+    staleThresholdMs,
+    reconnectGraceMs,
+  });
   let shuttingDown = false;
 
   async function shutdown(signal: string) {
@@ -98,6 +105,15 @@ if (subcommand === "send") {
   console.log(`Project root: ${config.projectRoot}`);
   console.log(`Bypass mode: ${settings["bypass-mode"] ?? false}`);
   console.log(`Claude timeout (seconds): ${settings.claude_timeout_seconds}`);
+  console.log(
+    `Connection heartbeat (seconds): ${settings.discord_connection_heartbeat_interval_seconds}`,
+  );
+  console.log(
+    `Connection stale threshold (seconds): ${settings.discord_connection_stale_threshold_seconds}`,
+  );
+  console.log(
+    `Connection reconnect grace (seconds): ${settings.discord_connection_reconnect_grace_seconds}`,
+  );
   console.log(`Discord connected: ${connection.isReady()}`);
 
   // Start scheduler
