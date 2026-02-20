@@ -1,9 +1,22 @@
-import { Client, GatewayIntentBits } from "discord.js";
+import { randomUUID } from "node:crypto";
 import { applyBotSettingsToConfig, loadConfig } from "./adapters/config-adapter";
 import { createBot } from "./adapters/discord-adapter";
-import { loadBotSettings, runScheduleByName, startScheduler } from "./adapters/scheduler-adapter";
+import { createEventRuntime } from "./adapters/event-runtime";
+import {
+  loadBotSettings,
+  runScheduleByName,
+  startSchedulerWithPublisher,
+} from "./adapters/scheduler-adapter";
 import { prepareDmFiles } from "./adapters/send-dm-adapter";
+import {
+  BOT_EVENT_DM_RECOVER_RUN,
+  BOT_EVENT_OUTBOUND_DM_REQUEST,
+  BOT_EVENT_SCHEDULER_TRIGGERED,
+  type DmRecoverRunEventPayload,
+  type OutboundDmRequestPayload,
+} from "./core/bot-events";
 import { createDiscordConnectionManager } from "./core/discord-connection";
+import { SqliteEventBus } from "./core/event-bus";
 import { parseSendCommandArgs, SEND_USAGE } from "./core/send-command";
 
 const config = loadConfig();
@@ -19,34 +32,38 @@ if (subcommand === "send") {
     process.exit(1);
   }
 
-  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-  await client.login(config.discordBotToken);
+  try {
+    const preparedFiles = await prepareDmFiles(parsed.value.filePaths, config.projectRoot);
+    const eventBus = new SqliteEventBus(config.eventBusDbFile);
+    const requestId = randomUUID();
 
-  client.on("clientReady", async () => {
-    try {
-      const preparedFiles = await prepareDmFiles(parsed.value.filePaths, config.projectRoot);
+    eventBus.publish({
+      type: BOT_EVENT_OUTBOUND_DM_REQUEST,
+      lane: "interactive",
+      payload: {
+        requestId,
+        source: "manual_send",
+        userId: parsed.value.userId,
+        text: parsed.value.message,
+        files: preparedFiles.map((file) => ({
+          path: file.resolvedPath,
+          name: file.fileName,
+        })),
+        context: `manual_send:user=${parsed.value.userId}`,
+      } satisfies OutboundDmRequestPayload,
+      priority: 30,
+      dedupeKey: `manual_send:${requestId}`,
+    });
+    eventBus.close();
 
-      const user = await client.users.fetch(parsed.value.userId);
-      await user.send({
-        ...(parsed.value.message ? { content: parsed.value.message } : {}),
-        ...(preparedFiles.length > 0
-          ? {
-              files: preparedFiles.map((file) => ({
-                attachment: file.resolvedPath,
-                name: file.fileName,
-              })),
-            }
-          : {}),
-      });
-      console.log(`DM sent to ${user.tag} (files=${preparedFiles.length})`);
-    } catch (error) {
-      console.error(`Failed to send DM: ${error}`);
-      console.error(SEND_USAGE);
-      process.exit(1);
-    } finally {
-      client.destroy();
-    }
-  });
+    console.log(
+      `DM request queued (request_id=${requestId}, user=${parsed.value.userId}, files=${preparedFiles.length})`,
+    );
+  } catch (error) {
+    console.error(`Failed to queue DM: ${error}`);
+    console.error(SEND_USAGE);
+    process.exit(1);
+  }
 } else if (subcommand === "schedule") {
   // 手動実行モード: bun run src/main.ts schedule <name>
   const name = process.argv[3];
@@ -69,8 +86,10 @@ if (subcommand === "send") {
   // Bot常駐モード(デフォルト): bun run src/main.ts
   const settings = await loadBotSettings(config);
   applyBotSettingsToConfig(config, settings);
+  const eventBus = new SqliteEventBus(config.eventBusDbFile);
   const client = createBot(config, {
     bypassMode: settings["bypass-mode"],
+    eventBus,
   });
   const heartbeatIntervalMs = settings.discord_connection_heartbeat_interval_seconds * 1000;
   const staleThresholdMs = settings.discord_connection_stale_threshold_seconds * 1000;
@@ -80,6 +99,16 @@ if (subcommand === "send") {
     staleThresholdMs,
     reconnectGraceMs,
   });
+  const runtime = createEventRuntime({
+    client,
+    config,
+    options: {
+      bypassMode: settings["bypass-mode"],
+      eventBus,
+    },
+    connection,
+    eventBus,
+  });
   let shuttingDown = false;
 
   async function shutdown(signal: string) {
@@ -87,7 +116,9 @@ if (subcommand === "send") {
     shuttingDown = true;
 
     console.log(`Shutting down... (signal=${signal})`);
+    runtime.stop();
     await connection.stop();
+    eventBus.close();
     process.exit(0);
   }
 
@@ -98,7 +129,29 @@ if (subcommand === "send") {
     void shutdown("SIGTERM");
   });
 
+  const enqueueRecovery = (reason: string): void => {
+    try {
+      eventBus.publish({
+        type: BOT_EVENT_DM_RECOVER_RUN,
+        lane: "recovery",
+        payload: {
+          reason,
+          triggeredAt: Date.now(),
+        } satisfies DmRecoverRunEventPayload,
+        priority: 10,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[event-bus] Failed to enqueue recovery run: ${errorMessage}`);
+    }
+  };
+
+  client.on("clientReady", () => {
+    enqueueRecovery("client_ready");
+  });
+
   await connection.start();
+  runtime.start();
 
   console.log("Discord daemon started");
   console.log(`Allowed users: ${config.allowedUserIds.join(", ")}`);
@@ -115,7 +168,20 @@ if (subcommand === "send") {
     `Connection reconnect grace (seconds): ${settings.discord_connection_reconnect_grace_seconds}`,
   );
   console.log(`Discord connected: ${connection.isReady()}`);
+  console.log(`Event bus DB: ${config.eventBusDbFile}`);
 
   // Start scheduler
-  startScheduler(settings, config, client, connection);
+  startSchedulerWithPublisher(settings, (payload) => {
+    try {
+      eventBus.publish({
+        type: BOT_EVENT_SCHEDULER_TRIGGERED,
+        lane: "scheduled",
+        payload,
+        priority: 0,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[event-bus] Failed to enqueue schedule trigger: ${errorMessage}`);
+    }
+  });
 }

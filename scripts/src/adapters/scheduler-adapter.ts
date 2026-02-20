@@ -2,13 +2,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Cron } from "croner";
 import type { Client, User } from "discord.js";
+import type { SchedulerTriggeredEventPayload } from "../core/bot-events";
 import { type BotSettings, parseBotSettings } from "../core/bot-settings";
 import {
   DEFAULT_WAIT_READY_TIMEOUT_MS,
   type DiscordConnectionManager,
 } from "../core/discord-connection";
 import { isSkipResponse, splitMessage, stripThinkTags } from "../core/message-format";
-import { sendToClaude } from "./claude-adapter";
+import { isClaudeAuthError, sendToClaude } from "./claude-adapter";
 import type { Config } from "./config-adapter";
 
 type Schedule = BotSettings["schedules"][number];
@@ -140,6 +141,31 @@ async function runSchedule(
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[scheduler] Schedule "${schedule.name}" failed: ${errorMsg}`);
 
+    if (client && isClaudeAuthError(error)) {
+      const canNotify = await ensureConnectedForSchedulerNotification(
+        connectionGuard,
+        schedule.name,
+      );
+      if (canNotify) {
+        const targetUserId = config.allowedUserIds[0];
+        const authErrorMsg = [
+          `⚠️ スケジュール「${schedule.name}」が Claude Code の認証エラーで失敗しました。`,
+          "",
+          "以下の手順で復旧してください:",
+          "1. `tmux kill-session -t cc-discord-bot` で Bot を停止",
+          `2. \`docker sandbox run --workspace ${config.projectRoot} claude\` で対話モードに入る`,
+          "3. `/login` でログイン（ブラウザが開きます）",
+          '4. Ctrl+C で終了後、Bot を再起動: `tmux new -d -s cc-discord-bot "bun run .claude/skills/cc-discord-bot/scripts/src/main.ts"`',
+        ].join("\n");
+        await sendDiscordDM(
+          client,
+          targetUserId,
+          authErrorMsg,
+          `schedule=${schedule.name},user=${targetUserId},reason=auth_error`,
+        ).catch(() => {});
+      }
+    }
+
     throw error;
   }
 }
@@ -159,6 +185,33 @@ export function startScheduler(
     const job = new Cron(schedule.cron, { timezone: schedule.timezone }, () => {
       runSchedule(schedule, settings, config, client, connectionGuard).catch(() => {
         // Error already logged in runSchedule
+      });
+    });
+
+    const nextRun = job.nextRun();
+    console.log(
+      `[scheduler] Registered "${schedule.name}" (${schedule.cron}) ` +
+        `timezone=${schedule.timezone}, next=${nextRun?.toISOString() ?? "unknown"}`,
+    );
+  }
+
+  console.log(`[scheduler] Started with ${settings.schedules.length} schedule(s)`);
+}
+
+export function startSchedulerWithPublisher(
+  settings: BotSettings,
+  publishTriggered: (payload: SchedulerTriggeredEventPayload) => void,
+): void {
+  if (settings.schedules.length === 0) {
+    console.log("[scheduler] No schedules configured");
+    return;
+  }
+
+  for (const schedule of settings.schedules) {
+    const job = new Cron(schedule.cron, { timezone: schedule.timezone }, () => {
+      publishTriggered({
+        scheduleName: schedule.name,
+        triggeredAt: Date.now(),
       });
     });
 

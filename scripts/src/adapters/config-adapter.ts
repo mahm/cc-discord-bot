@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { config as dotenvConfig } from "dotenv";
 import type { BotSettings } from "../core/bot-settings";
@@ -15,9 +14,11 @@ const PROMPTS_ROOT = path.join(SRC_ROOT, "prompts");
 // Load .env from project root
 dotenvConfig({ path: path.join(PROJECT_ROOT, ".env") });
 
-const SESSION_DIR = path.join(os.tmpdir(), "cc-discord-bot");
-const SESSION_FILE = path.join(SESSION_DIR, "session_id.txt");
-const ATTACHMENT_ROOT_DIR = path.join(PROJECT_ROOT, "tmp", "cc-discord-bot", "attachments");
+const STATE_DIR = path.join(PROJECT_ROOT, "tmp", "cc-discord-bot");
+const SESSION_FILE = path.join(STATE_DIR, "session_id.txt");
+const SANDBOX_ID_FILE = path.join(STATE_DIR, "sandbox_id.txt");
+const EVENT_BUS_DB_FILE = path.join(STATE_DIR, "event-bus.sqlite3");
+const ATTACHMENT_ROOT_DIR = path.join(STATE_DIR, "attachments");
 const MAX_ATTACHMENT_BYTES_PER_FILE = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES_PER_MESSAGE = 50 * 1024 * 1024;
 const ATTACHMENT_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -34,6 +35,9 @@ export interface Config {
   promptTemplatePath: string;
   sessionFile: string;
   sessionDir: string;
+  sandboxIdFile: string;
+  eventBusDbFile: string;
+  enableSandbox: boolean;
   claudeTimeout: number;
   claudeEnv: Record<string, string>;
   attachmentRootDir: string;
@@ -76,7 +80,10 @@ export function loadConfig(): Config {
     appendSystemPromptPath,
     promptTemplatePath,
     sessionFile: SESSION_FILE,
-    sessionDir: SESSION_DIR,
+    sessionDir: STATE_DIR,
+    sandboxIdFile: SANDBOX_ID_FILE,
+    eventBusDbFile: EVENT_BUS_DB_FILE,
+    enableSandbox: true,
     claudeTimeout: DEFAULT_CLAUDE_TIMEOUT_MS,
     claudeEnv: {},
     attachmentRootDir: ATTACHMENT_ROOT_DIR,
@@ -90,4 +97,5 @@ export function loadConfig(): Config {
 export function applyBotSettingsToConfig(config: Config, settings: BotSettings): void {
   config.claudeTimeout = settings.claude_timeout_seconds * 1000;
   config.claudeEnv = settings.env;
+  config.enableSandbox = settings.enable_sandbox ?? true;
 }

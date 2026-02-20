@@ -33,6 +33,7 @@ describe("config-adapter", () => {
     ).toBe(true);
     expect(config.promptTemplatePath.endsWith("scripts/src/prompts/prompt-template.md")).toBe(true);
     expect(config.claudeTimeout).toBe(30 * 60 * 1000);
+    expect(config.eventBusDbFile.endsWith("tmp/cc-discord-bot/event-bus.sqlite3")).toBe(true);
   });
 
   it("applies timeout seconds from bot settings", () => {
