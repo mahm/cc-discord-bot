@@ -509,6 +509,22 @@ export class SqliteEventBus {
     return row?.last_seen_message_id ?? null;
   }
 
+  hasActiveDmIncomingEvent(messageId: string): boolean {
+    const row = this.db
+      .query(
+        `
+          SELECT 1
+          FROM events
+          WHERE type = 'dm.incoming'
+            AND status IN ('pending', 'processing', 'retry')
+            AND json_extract(payload_json, '$.messageId') = ?
+          LIMIT 1
+        `,
+      )
+      .get(messageId) as { 1: number } | null;
+    return row !== null;
+  }
+
   updateDmOffset(scope: string, messageId: string): void {
     const current = this.getDmOffset(scope);
     if (current) {

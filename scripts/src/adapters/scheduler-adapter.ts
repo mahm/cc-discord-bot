@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Cron } from "croner";
 import type { Client, User } from "discord.js";
-import type { SchedulerTriggeredEventPayload } from "../core/bot-events";
+import { SCHEDULER_EVENT_TTL_MS, type SchedulerTriggeredEventPayload } from "../core/bot-events";
 import { type BotSettings, parseBotSettings } from "../core/bot-settings";
 import {
   DEFAULT_WAIT_READY_TIMEOUT_MS,
@@ -209,9 +209,11 @@ export function startSchedulerWithPublisher(
 
   for (const schedule of settings.schedules) {
     const job = new Cron(schedule.cron, { timezone: schedule.timezone }, () => {
+      const triggeredAt = Date.now();
       publishTriggered({
         scheduleName: schedule.name,
-        triggeredAt: Date.now(),
+        triggeredAt,
+        expiresAt: triggeredAt + SCHEDULER_EVENT_TTL_MS,
       });
     });
 

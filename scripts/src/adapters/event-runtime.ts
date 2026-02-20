@@ -9,6 +9,7 @@ import {
   type DmReconcileRunEventPayload,
   type DmRecoverRunEventPayload,
   type OutboundDmRequestPayload,
+  SCHEDULER_EVENT_TTL_MS,
   type SchedulerTriggeredEventPayload,
 } from "../core/bot-events";
 import { runWithEmptyResponseRetry } from "../core/claude-retry";
@@ -123,7 +124,16 @@ function isSchedulerTriggeredPayload(payload: unknown): payload is SchedulerTrig
     return false;
   }
   const maybe = payload as Partial<SchedulerTriggeredEventPayload>;
-  return typeof maybe.scheduleName === "string";
+  if (typeof maybe.scheduleName !== "string") {
+    return false;
+  }
+  if (typeof maybe.triggeredAt !== "number" || !Number.isFinite(maybe.triggeredAt)) {
+    return false;
+  }
+  if (maybe.expiresAt !== undefined && !Number.isFinite(maybe.expiresAt)) {
+    return false;
+  }
+  return true;
 }
 
 function isRecoverPayload(payload: unknown): payload is DmRecoverRunEventPayload {
@@ -140,16 +150,6 @@ function isReconcilePayload(payload: unknown): payload is DmReconcileRunEventPay
   }
   const maybe = payload as Partial<DmReconcileRunEventPayload>;
   return typeof maybe.reason === "string";
-}
-
-async function ensureDiscordReady(connection: ConnectionGuard, timeoutMs = 10_000): Promise<void> {
-  if (connection.isReady()) {
-    return;
-  }
-  const ready = await connection.waitUntilReady(timeoutMs);
-  if (!ready) {
-    throw new RetryableEventError("Discord connection is not ready");
-  }
 }
 
 async function fetchDmMessage(
@@ -215,6 +215,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
   let running = false;
   let workerPromise: Promise<void> | null = null;
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  let waitingForConnection = false;
 
   async function enqueueReconcile(reason: string): Promise<void> {
     input.eventBus.publish({
@@ -229,8 +230,6 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
   }
 
   async function handleOutboundDmRequest(payload: OutboundDmRequestPayload): Promise<void> {
-    await ensureDiscordReady(input.connection);
-
     const files = (payload.files ?? []).map((file) => ({
       path: String(file.path ?? ""),
       name: String(file.name ?? "file"),
@@ -391,7 +390,6 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       return;
     }
 
-    await ensureDiscordReady(input.connection);
     const message = await fetchDmMessage(input.client, payload.channelId, payload.messageId);
 
     if (!state.eyeApplied) {
@@ -457,6 +455,19 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
   }
 
   async function handleSchedulerTriggered(payload: SchedulerTriggeredEventPayload): Promise<void> {
+    const now = Date.now();
+    const expiresAt =
+      typeof payload.expiresAt === "number" && Number.isFinite(payload.expiresAt)
+        ? payload.expiresAt
+        : payload.triggeredAt + SCHEDULER_EVENT_TTL_MS;
+
+    if (expiresAt <= now) {
+      console.warn(
+        `[scheduler] Skip expired trigger (schedule=${payload.scheduleName}, triggered_at=${payload.triggeredAt}, expires_at=${expiresAt}, now=${now})`,
+      );
+      return;
+    }
+
     const settings = await loadBotSettings(input.config);
     const schedule = settings.schedules.find((entry) => entry.name === payload.scheduleName);
     if (!schedule) {
@@ -487,7 +498,6 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
 
   async function handleRecoveryRun(payload: DmRecoverRunEventPayload): Promise<void> {
     console.log(`[recovery] Start reason=${payload.reason}`);
-    await ensureDiscordReady(input.connection, 20_000);
 
     for (const userId of input.config.allowedUserIds) {
       const scope = `dm_user:${userId}`;
@@ -542,6 +552,9 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
           if (existing?.processingDone || existing?.terminalFailed) {
             continue;
           }
+          if (input.eventBus.hasActiveDmIncomingEvent(message.id)) {
+            continue;
+          }
 
           input.eventBus.publish({
             type: BOT_EVENT_DM_INCOMING,
@@ -569,6 +582,9 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
     const missingEye = input.eventBus.listDmMissingEye(50);
     const missingCheck = input.eventBus.listDmMissingCheck(50);
     for (const entry of [...missingEye, ...missingCheck]) {
+      if (input.eventBus.hasActiveDmIncomingEvent(entry.messageId)) {
+        continue;
+      }
       input.eventBus.publish({
         type: BOT_EVENT_DM_INCOMING,
         lane: "interactive",
@@ -631,6 +647,26 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
 
   async function runWorkerLoop(): Promise<void> {
     while (running) {
+      if (!input.connection.isReady()) {
+        if (!waitingForConnection) {
+          waitingForConnection = true;
+          console.warn("[event-bus] Connection not ready. Pausing event processing.");
+        }
+
+        const ready = await input.connection.waitUntilReady(60_000);
+        if (!running) {
+          break;
+        }
+        if (!ready) {
+          continue;
+        }
+      }
+
+      if (waitingForConnection) {
+        waitingForConnection = false;
+        console.log("[event-bus] Connection recovered. Resuming event processing.");
+      }
+
       const requeued = input.eventBus.requeueStaleProcessing(STALE_LOCK_TIMEOUT_MS);
       if (requeued > 0) {
         console.warn(`[event-bus] Requeued stale events: ${requeued}`);

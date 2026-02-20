@@ -38,6 +38,14 @@ export function createBot(config: Config, options: BotOptions): Client {
       return;
     }
 
+    if (options.eventBus.hasActiveDmIncomingEvent(message.id)) {
+      return;
+    }
+    const existingState = options.eventBus.getDmMessageState(message.id);
+    if (existingState?.processingDone || existingState?.terminalFailed) {
+      return;
+    }
+
     const payload: DmIncomingEventPayload = {
       messageId: message.id,
       channelId: message.channelId,

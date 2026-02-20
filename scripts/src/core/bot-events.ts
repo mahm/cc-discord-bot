@@ -3,6 +3,7 @@ export const BOT_EVENT_OUTBOUND_DM_REQUEST = "outbound.dm.request";
 export const BOT_EVENT_SCHEDULER_TRIGGERED = "scheduler.triggered";
 export const BOT_EVENT_DM_RECOVER_RUN = "dm.recover.run";
 export const BOT_EVENT_DM_RECONCILE_RUN = "dm.reconcile.run";
+export const SCHEDULER_EVENT_TTL_MS = 15 * 60 * 1000;
 
 export type BotEventType =
   | typeof BOT_EVENT_DM_INCOMING
@@ -37,6 +38,7 @@ export interface OutboundDmRequestPayload {
 export interface SchedulerTriggeredEventPayload {
   scheduleName: string;
   triggeredAt: number;
+  expiresAt?: number;
 }
 
 export interface DmRecoverRunEventPayload {
