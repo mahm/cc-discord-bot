@@ -93,7 +93,6 @@ describe("createDiscordConnectionManager", () => {
     const fake = new FakeClient();
     const manager = createDiscordConnectionManager(fake as unknown as Client, "token", {
       heartbeatIntervalMs: 10,
-      staleThresholdMs: 60_000,
       reconnectGraceMs: 100,
     });
 
@@ -109,21 +108,22 @@ describe("createDiscordConnectionManager", () => {
     await manager.stop();
   });
 
-  it("heartbeat triggers forced reconnect when gateway events become stale", async () => {
+  it("heartbeat stays idle when connection is healthy", async () => {
     const fake = new FakeClient();
     const manager = createDiscordConnectionManager(fake as unknown as Client, "token", {
       heartbeatIntervalMs: 10,
-      staleThresholdMs: 30,
       reconnectGraceMs: 100,
     });
 
     await manager.start();
+    const loginCallsAtStart = fake.loginCalls;
 
-    await sleep(1200);
+    await sleep(200);
 
     const state = manager.getState();
-    expect(state.forcedReconnects).toBeGreaterThanOrEqual(1);
-    expect(fake.destroyCalls).toBeGreaterThanOrEqual(1);
+    expect(state.forcedReconnects).toBe(0);
+    expect(fake.loginCalls).toBe(loginCallsAtStart);
+    expect(fake.destroyCalls).toBe(0);
     await manager.stop();
   });
 
@@ -133,7 +133,6 @@ describe("createDiscordConnectionManager", () => {
 
     const manager = createDiscordConnectionManager(fake as unknown as Client, "token", {
       heartbeatIntervalMs: 10,
-      staleThresholdMs: 60_000,
       reconnectGraceMs: 100,
     });
 

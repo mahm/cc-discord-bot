@@ -2,15 +2,16 @@ import type { Client } from "discord.js";
 
 export const INITIAL_RECONNECT_DELAY_MS = 1000;
 export const MAX_RECONNECT_DELAY_MS = 60_000;
+export const MAX_RECONNECT_ATTEMPT = 10;
 export const DEFAULT_WAIT_READY_TIMEOUT_MS = 10_000;
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
-export const DEFAULT_STALE_THRESHOLD_MS = 180_000;
 export const DEFAULT_RECONNECT_GRACE_MS = 20_000;
 export const HIGH_PING_THRESHOLD_MS = 15_000;
 export const HIGH_PING_CONSECUTIVE_LIMIT = 3;
 
 type Logger = Pick<typeof console, "error" | "log" | "warn">;
-type Timer = ReturnType<typeof setTimeout>;
+type WaitTimer = ReturnType<typeof setTimeout>;
+type HeartbeatTimer = ReturnType<typeof setInterval>;
 
 interface PingCapableClient {
   ws?: {
@@ -35,20 +36,18 @@ export interface DiscordConnectionState {
 
 export interface DiscordConnectionOptions {
   heartbeatIntervalMs?: number;
-  staleThresholdMs?: number;
   reconnectGraceMs?: number;
   logger?: Logger;
 }
 
 interface Waiter {
   resolve: (value: boolean) => void;
-  timer: Timer;
+  timer: WaitTimer;
 }
 
 interface UnhealthyConnection {
-  reason: "not_ready" | "stale_gateway" | "high_ping";
+  reason: "not_ready" | "high_ping";
   pingMs: number | null;
-  sinceLastEventMs: number | null;
 }
 
 function normalizeMs(value: number | undefined, fallbackMs: number): number {
@@ -81,19 +80,16 @@ export function createDiscordConnectionManager(
     options?.heartbeatIntervalMs,
     DEFAULT_HEARTBEAT_INTERVAL_MS,
   );
-  const staleThresholdMs = normalizeMs(options?.staleThresholdMs, DEFAULT_STALE_THRESHOLD_MS);
   const reconnectGraceMs = normalizeMs(options?.reconnectGraceMs, DEFAULT_RECONNECT_GRACE_MS);
 
   let started = false;
   let stopping = false;
   let attempt = 0;
-  let reconnectTimer: Timer | null = null;
-  let heartbeatTimer: Timer | null = null;
-  let reconnectInFlight = false;
-  let forceReconnectInFlight = false;
-  let heartbeatTickInFlight = false;
+  let heartbeatTimer: HeartbeatTimer | null = null;
+  let reconnectPromise: Promise<void> | null = null;
+  let reconnectReason: string | null = null;
+  let forceReconnectRequested = false;
   let forcedReconnects = 0;
-  let lastGatewayEventAt: number | null = null;
   let lastHealthyAt: number | null = null;
   let consecutiveHighPingCount = 0;
   const waiters = new Set<Waiter>();
@@ -127,18 +123,6 @@ export function createDiscordConnectionManager(
     return ping;
   }
 
-  function touchGatewayActivity(): void {
-    lastGatewayEventAt = Date.now();
-  }
-
-  function clearReconnectTimer(): void {
-    if (!reconnectTimer) {
-      return;
-    }
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
   function clearHeartbeatTimer(): void {
     if (!heartbeatTimer) {
       return;
@@ -147,16 +131,11 @@ export function createDiscordConnectionManager(
     heartbeatTimer = null;
   }
 
-  function diagnoseConnectionHealth(now: number): UnhealthyConnection | null {
+  function diagnoseConnectionHealth(): UnhealthyConnection | null {
     const pingMs = getWsPingMs();
-    const sinceLastEventMs = lastGatewayEventAt === null ? null : now - lastGatewayEventAt;
 
     if (!isReady()) {
-      return { reason: "not_ready", pingMs, sinceLastEventMs };
-    }
-
-    if (sinceLastEventMs !== null && sinceLastEventMs > staleThresholdMs) {
-      return { reason: "stale_gateway", pingMs, sinceLastEventMs };
+      return { reason: "not_ready", pingMs };
     }
 
     if (pingMs !== null && pingMs > HIGH_PING_THRESHOLD_MS) {
@@ -166,128 +145,98 @@ export function createDiscordConnectionManager(
     }
 
     if (consecutiveHighPingCount >= HIGH_PING_CONSECUTIVE_LIMIT) {
-      return { reason: "high_ping", pingMs, sinceLastEventMs };
+      return { reason: "high_ping", pingMs };
     }
 
     return null;
   }
 
-  async function reconnectNow(reason: string): Promise<void> {
-    if (stopping || reconnectInFlight || forceReconnectInFlight || isReady()) {
+  function requestReconnect(reason: string, force = false): void {
+    if (stopping) {
       return;
     }
-    reconnectInFlight = true;
+    reconnectReason = reason;
+    if (force) {
+      forceReconnectRequested = true;
+    }
 
-    logger.warn(
-      `[discord-connection] event=reconnect_attempt reason=${reason} attempt=${attempt || 1}`,
-    );
+    if (reconnectPromise) {
+      return;
+    }
 
-    try {
-      await client.login(token);
-    } catch (error) {
+    reconnectPromise = runReconnectLoop().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`[discord-connection] event=reconnect_failed message=${message}`);
-      scheduleReconnect("login_failed");
-    } finally {
-      reconnectInFlight = false;
-    }
+      logger.error(`[discord-connection] event=reconnect_loop_failed message=${message}`);
+    });
   }
 
-  function scheduleReconnect(reason: string): void {
-    if (stopping || reconnectTimer || reconnectInFlight || forceReconnectInFlight || isReady()) {
-      return;
-    }
-
-    attempt += 1;
-    const delayMs = calculateReconnectDelayMs(attempt);
-    logger.warn(
-      `[discord-connection] event=reconnect_scheduled reason=${reason} attempt=${attempt} delay_ms=${delayMs}`,
-    );
-
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      void reconnectNow(reason);
-    }, delayMs);
-  }
-
-  async function forceReconnect(reason: string): Promise<void> {
-    if (stopping || forceReconnectInFlight) {
-      return;
-    }
-
-    forceReconnectInFlight = true;
-    forcedReconnects += 1;
-    attempt += 1;
-    clearReconnectTimer();
-    consecutiveHighPingCount = 0;
-
-    const delayMs = calculateReconnectDelayMs(attempt);
-    logger.warn(
-      `[discord-connection] event=force_reconnect_start reason=${reason} attempt=${attempt} delay_ms=${delayMs}`,
-    );
-
-    let nextRetryReason: string | null = null;
-    reconnectInFlight = true;
+  async function runReconnectLoop(): Promise<void> {
     try {
-      client.destroy();
-      await wait(delayMs);
-      if (stopping) {
-        return;
-      }
+      while (!stopping && (forceReconnectRequested || !isReady())) {
+        attempt = Math.min(attempt + 1, MAX_RECONNECT_ATTEMPT);
+        const reason = reconnectReason ?? "retry";
+        const forceCurrentCycle = forceReconnectRequested;
+        reconnectReason = null;
+        forceReconnectRequested = false;
+        if (forceCurrentCycle) {
+          forcedReconnects += 1;
+        }
+        consecutiveHighPingCount = 0;
 
-      await client.login(token);
-
-      const ready = await waitUntilReady(reconnectGraceMs);
-      if (!ready) {
+        const delayMs = attempt <= 1 ? 0 : calculateReconnectDelayMs(attempt);
         logger.warn(
-          `[discord-connection] event=force_reconnect_grace_timeout reason=${reason} grace_ms=${reconnectGraceMs}`,
+          `[discord-connection] event=reconnect_scheduled reason=${reason} attempt=${attempt} delay_ms=${delayMs}`,
         );
-        nextRetryReason = "force_reconnect_grace_timeout";
-      } else {
-        logger.log("[discord-connection] event=force_reconnect_success");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error(`[discord-connection] event=force_reconnect_failed message=${message}`);
-      nextRetryReason = "force_reconnect_failed";
-    } finally {
-      reconnectInFlight = false;
-      forceReconnectInFlight = false;
-    }
+        if (delayMs > 0) {
+          await wait(delayMs);
+        }
+        if (stopping || (!forceCurrentCycle && isReady())) {
+          return;
+        }
 
-    if (nextRetryReason) {
-      scheduleReconnect(nextRetryReason);
+        logger.warn(
+          `[discord-connection] event=reconnect_attempt reason=${reason} attempt=${attempt}`,
+        );
+
+        client.destroy();
+        try {
+          await client.login(token);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.error(`[discord-connection] event=reconnect_failed message=${message}`);
+          continue;
+        }
+
+        const ready = await waitUntilReady(reconnectGraceMs);
+        if (!ready) {
+          logger.warn(
+            `[discord-connection] event=reconnect_grace_timeout reason=${reason} grace_ms=${reconnectGraceMs}`,
+          );
+        }
+      }
+    } finally {
+      reconnectPromise = null;
+      if (!stopping && !isReady() && reconnectReason) {
+        requestReconnect(reconnectReason, forceReconnectRequested);
+      }
     }
   }
 
-  async function runHeartbeatCheck(): Promise<void> {
-    if (
-      stopping ||
-      !started ||
-      heartbeatTickInFlight ||
-      reconnectInFlight ||
-      forceReconnectInFlight
-    ) {
+  function runHeartbeatCheck(): void {
+    if (stopping || !started || reconnectPromise) {
       return;
     }
 
-    heartbeatTickInFlight = true;
-    try {
-      const now = Date.now();
-      const unhealthy = diagnoseConnectionHealth(now);
-
-      if (!unhealthy) {
-        lastHealthyAt = now;
-        return;
-      }
-
-      logger.warn(
-        `[discord-connection] event=heartbeat_unhealthy reason=${unhealthy.reason} ready=${isReady()} ping_ms=${unhealthy.pingMs ?? "unknown"} since_last_event_ms=${unhealthy.sinceLastEventMs ?? "unknown"}`,
-      );
-      await forceReconnect(`heartbeat_${unhealthy.reason}`);
-    } finally {
-      heartbeatTickInFlight = false;
+    const unhealthy = diagnoseConnectionHealth();
+    if (!unhealthy) {
+      lastHealthyAt = Date.now();
+      return;
     }
+
+    logger.warn(
+      `[discord-connection] event=heartbeat_unhealthy reason=${unhealthy.reason} ready=${isReady()} ping_ms=${unhealthy.pingMs ?? "unknown"}`,
+    );
+    requestReconnect(`heartbeat_${unhealthy.reason}`, true);
   }
 
   function startHeartbeat(): void {
@@ -295,39 +244,35 @@ export function createDiscordConnectionManager(
       return;
     }
     heartbeatTimer = setInterval(() => {
-      void runHeartbeatCheck();
+      runHeartbeatCheck();
     }, heartbeatIntervalMs);
     logger.log(
-      `[discord-connection] event=heartbeat_started interval_ms=${heartbeatIntervalMs} stale_threshold_ms=${staleThresholdMs} reconnect_grace_ms=${reconnectGraceMs}`,
+      `[discord-connection] event=heartbeat_started interval_ms=${heartbeatIntervalMs} reconnect_grace_ms=${reconnectGraceMs}`,
     );
   }
 
   function registerEvents(): void {
     client.on("clientReady", () => {
-      const wasReconnecting = attempt > 0;
+      const isFirstConnection = lastHealthyAt === null;
       attempt = 0;
-      clearReconnectTimer();
+      reconnectReason = null;
+      forceReconnectRequested = false;
       consecutiveHighPingCount = 0;
-      touchGatewayActivity();
       lastHealthyAt = Date.now();
       resolveWaiters(true);
 
-      if (wasReconnecting) {
-        logger.log("[discord-connection] event=reconnect_success");
-      } else {
+      if (isFirstConnection) {
         logger.log("[discord-connection] event=connected");
+      } else {
+        logger.log("[discord-connection] event=reconnect_success");
       }
-    });
-
-    client.on("raw", () => {
-      touchGatewayActivity();
     });
 
     client.on("error", (error) => {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`[discord-connection] event=client_error message=${message}`);
       if (!isReady()) {
-        scheduleReconnect("client_error");
+        requestReconnect("client_error");
       }
     });
 
@@ -335,7 +280,7 @@ export function createDiscordConnectionManager(
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`[discord-connection] event=shard_error shard=${shardId} message=${message}`);
       if (!isReady()) {
-        scheduleReconnect("shard_error");
+        requestReconnect("shard_error");
       }
     });
 
@@ -343,7 +288,7 @@ export function createDiscordConnectionManager(
       logger.warn(
         `[discord-connection] event=disconnect shard=${shardId} code=${event.code} reason=${event.reason ?? "unknown"} clean=${event.wasClean}`,
       );
-      scheduleReconnect("shard_disconnect");
+      requestReconnect("shard_disconnect");
     });
 
     client.on("shardReconnecting", (shardId) => {
@@ -353,9 +298,11 @@ export function createDiscordConnectionManager(
     client.on("invalidated", () => {
       logger.error("[discord-connection] event=invalidated action=stop");
       stopping = true;
-      clearReconnectTimer();
       clearHeartbeatTimer();
+      reconnectReason = null;
+      forceReconnectRequested = false;
       resolveWaiters(false);
+      client.destroy();
     });
   }
 
@@ -371,17 +318,27 @@ export function createDiscordConnectionManager(
 
     try {
       await client.login(token);
+      void waitUntilReady(reconnectGraceMs).then((ready) => {
+        if (ready || stopping) {
+          return;
+        }
+        logger.warn(
+          `[discord-connection] event=initial_login_grace_timeout grace_ms=${reconnectGraceMs}`,
+        );
+        requestReconnect("initial_login_grace_timeout");
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`[discord-connection] event=initial_login_failed message=${message}`);
-      scheduleReconnect("initial_login_failed");
+      requestReconnect("initial_login_failed");
     }
   }
 
   async function stop(): Promise<void> {
     stopping = true;
-    clearReconnectTimer();
     clearHeartbeatTimer();
+    reconnectReason = null;
+    forceReconnectRequested = false;
     resolveWaiters(false);
     client.destroy();
   }
@@ -395,10 +352,13 @@ export function createDiscordConnectionManager(
     }
 
     return new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        waiters.delete(waiter);
-        resolve(false);
-      }, timeoutMs);
+      const timer = setTimeout(
+        () => {
+          waiters.delete(waiter);
+          resolve(false);
+        },
+        Math.max(1, timeoutMs),
+      );
 
       const waiter: Waiter = {
         resolve: (value) => {

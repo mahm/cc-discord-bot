@@ -87,25 +87,17 @@ if (subcommand === "send") {
   const settings = await loadBotSettings(config);
   applyBotSettingsToConfig(config, settings);
   const eventBus = new SqliteEventBus(config.eventBusDbFile);
-  const client = createBot(config, {
-    bypassMode: settings["bypass-mode"],
-    eventBus,
-  });
+  const client = createBot(config, { eventBus });
   const heartbeatIntervalMs = settings.discord_connection_heartbeat_interval_seconds * 1000;
-  const staleThresholdMs = settings.discord_connection_stale_threshold_seconds * 1000;
   const reconnectGraceMs = settings.discord_connection_reconnect_grace_seconds * 1000;
   const connection = createDiscordConnectionManager(client, config.discordBotToken, {
     heartbeatIntervalMs,
-    staleThresholdMs,
     reconnectGraceMs,
   });
   const runtime = createEventRuntime({
     client,
     config,
-    options: {
-      bypassMode: settings["bypass-mode"],
-      eventBus,
-    },
+    bypassMode: settings["bypass-mode"],
     connection,
     eventBus,
   });
@@ -160,9 +152,6 @@ if (subcommand === "send") {
   console.log(`Claude timeout (seconds): ${settings.claude_timeout_seconds}`);
   console.log(
     `Connection heartbeat (seconds): ${settings.discord_connection_heartbeat_interval_seconds}`,
-  );
-  console.log(
-    `Connection stale threshold (seconds): ${settings.discord_connection_stale_threshold_seconds}`,
   );
   console.log(
     `Connection reconnect grace (seconds): ${settings.discord_connection_reconnect_grace_seconds}`,

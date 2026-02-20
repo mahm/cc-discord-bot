@@ -4,7 +4,6 @@ import type { SqliteEventBus } from "../core/event-bus";
 import type { Config } from "./config-adapter";
 
 export interface BotOptions {
-  bypassMode?: boolean;
   eventBus: SqliteEventBus;
 }
 

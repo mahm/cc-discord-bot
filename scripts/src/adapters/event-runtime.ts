@@ -13,6 +13,7 @@ import {
   type SchedulerTriggeredEventPayload,
 } from "../core/bot-events";
 import { runWithEmptyResponseRetry } from "../core/claude-retry";
+import { classifyDiscordError, isTerminalDiscordError } from "../core/discord-errors";
 import { type EventBusEvent, SqliteEventBus } from "../core/event-bus";
 import {
   EMPTY_RESPONSE_FALLBACK_MESSAGE,
@@ -27,7 +28,6 @@ import {
 } from "./attachments-adapter";
 import { clearSession, getSessionId, isClaudeAuthError, sendToClaude } from "./claude-adapter";
 import type { Config } from "./config-adapter";
-import type { BotOptions } from "./discord-adapter";
 import { loadBotSettings, runScheduleByName } from "./scheduler-adapter";
 
 const EYE_EMOJI = "\u{1F440}";
@@ -68,22 +68,6 @@ function wait(ms: number): Promise<void> {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function parseDiscordCode(error: unknown): number | null {
-  if (!error || typeof error !== "object") {
-    return null;
-  }
-  const maybeCode = (error as { code?: unknown }).code;
-  return typeof maybeCode === "number" ? maybeCode : null;
-}
-
-function isTerminalDiscordError(error: unknown): boolean {
-  const code = parseDiscordCode(error);
-  if (code === null) {
-    return false;
-  }
-  return code === 10_003 || code === 10_008 || code === 50_001 || code === 50_013;
 }
 
 function compareSnowflakeAsc(left: string, right: string): number {
@@ -152,21 +136,52 @@ function isReconcilePayload(payload: unknown): payload is DmReconcileRunEventPay
   return typeof maybe.reason === "string";
 }
 
+function classifyDmIncomingError(error: unknown): "terminal" | "retryable" {
+  if (error instanceof TerminalEventError) {
+    return "terminal";
+  }
+  if (error instanceof RetryableEventError) {
+    return "retryable";
+  }
+  return classifyDiscordError(error);
+}
+
 async function fetchDmMessage(
   client: Client,
   channelId: string,
   messageId: string,
 ): Promise<Message<boolean>> {
-  const channel = await client.channels.fetch(channelId);
+  let channel: Awaited<ReturnType<Client["channels"]["fetch"]>>;
+  try {
+    channel = await client.channels.fetch(channelId);
+  } catch (error) {
+    const errorMessage = toErrorMessage(error);
+    if (isTerminalDiscordError(error)) {
+      throw new TerminalEventError(errorMessage);
+    }
+    throw new RetryableEventError(errorMessage);
+  }
+
   if (!channel || !channel.isDMBased()) {
     throw new TerminalEventError(`DM channel not found: ${channelId}`);
   }
 
-  const message = await channel.messages.fetch(messageId);
-  if (!message) {
-    throw new TerminalEventError(`Message not found: ${messageId}`);
+  try {
+    const message = await channel.messages.fetch(messageId);
+    if (!message) {
+      throw new TerminalEventError(`Message not found: ${messageId}`);
+    }
+    return message;
+  } catch (error) {
+    if (error instanceof TerminalEventError) {
+      throw error;
+    }
+    const errorMessage = toErrorMessage(error);
+    if (isTerminalDiscordError(error)) {
+      throw new TerminalEventError(errorMessage);
+    }
+    throw new RetryableEventError(errorMessage);
   }
-  return message;
 }
 
 async function sendUserMessageWithOptionalFiles(
@@ -205,7 +220,7 @@ export interface EventRuntime {
 interface CreateEventRuntimeInput {
   client: Client;
   config: Config;
-  options: BotOptions | undefined;
+  bypassMode?: boolean;
   connection: ConnectionGuard;
   eventBus: SqliteEventBus;
 }
@@ -227,6 +242,38 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       } satisfies DmReconcileRunEventPayload,
       priority: -1,
     });
+  }
+
+  function enqueueDmIncoming(
+    payload: DmIncomingEventPayload,
+    lane: "interactive" | "recovery",
+    priority: number,
+  ): void {
+    input.eventBus.publish({
+      type: BOT_EVENT_DM_INCOMING,
+      lane,
+      payload,
+      priority,
+    });
+  }
+
+  function enqueueDmIncomingIfIdle(
+    entry: Pick<DmIncomingEventPayload, "messageId" | "channelId" | "authorId">,
+    lane: "interactive" | "recovery",
+    priority: number,
+  ): void {
+    if (input.eventBus.hasActiveDmIncomingEvent(entry.messageId)) {
+      return;
+    }
+    enqueueDmIncoming(
+      {
+        messageId: entry.messageId,
+        channelId: entry.channelId,
+        authorId: entry.authorId,
+      },
+      lane,
+      priority,
+    );
   }
 
   async function handleOutboundDmRequest(payload: OutboundDmRequestPayload): Promise<void> {
@@ -308,7 +355,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       const { result, attempts } = await runWithEmptyResponseRetry(
         async () =>
           await sendToClaude(content, input.config, {
-            bypassMode: input.options?.bypassMode,
+            bypassMode: input.bypassMode,
             attachments,
             source: "dm",
             authorId: message.author.id,
@@ -383,6 +430,19 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
     }
   }
 
+  function markDmTerminalFailureIfNeeded(
+    messageId: string,
+    errorMessage: string,
+    reason: string,
+  ): void {
+    const current = input.eventBus.getDmMessageState(messageId);
+    if (current?.terminalFailed) {
+      return;
+    }
+    input.eventBus.markDmTerminalFailure(messageId, errorMessage);
+    console.error(`[dm.incoming] terminal message=${messageId} reason=${reason}: ${errorMessage}`);
+  }
+
   async function handleDmIncoming(payload: DmIncomingEventPayload): Promise<void> {
     input.eventBus.upsertDmMessage(payload.messageId, payload.channelId, payload.authorId);
     const state = input.eventBus.getDmMessageState(payload.messageId);
@@ -390,65 +450,88 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       return;
     }
 
-    const message = await fetchDmMessage(input.client, payload.channelId, payload.messageId);
+    try {
+      const message = await fetchDmMessage(input.client, payload.channelId, payload.messageId);
 
-    if (!state.eyeApplied) {
+      if (!state.eyeApplied) {
+        try {
+          await message.react(EYE_EMOJI);
+          input.eventBus.markEyeApplied(payload.messageId);
+        } catch (error) {
+          const errorMessage = toErrorMessage(error);
+          console.warn(
+            `[discord] 👀 reaction failed message=${payload.messageId}: ${errorMessage}`,
+          );
+          if (isTerminalDiscordError(error)) {
+            throw new TerminalEventError(errorMessage);
+          }
+          throw new RetryableEventError(errorMessage);
+        }
+      }
+
+      const refreshed = input.eventBus.getDmMessageState(payload.messageId);
+      if (!refreshed || refreshed.terminalFailed) {
+        return;
+      }
+
+      if (!refreshed.processingDone) {
+        try {
+          await processDmMessage(message);
+          input.eventBus.markProcessingDone(payload.messageId);
+        } catch (error) {
+          const errorMessage = toErrorMessage(error);
+          input.eventBus.setDmLastError(payload.messageId, errorMessage);
+          if (error instanceof RetryableEventError) {
+            throw error;
+          }
+
+          try {
+            await message.react(ERROR_EMOJI);
+          } catch (reactError) {
+            console.warn(
+              `[discord] ❌ reaction failed message=${payload.messageId}: ${toErrorMessage(reactError)}`,
+            );
+          }
+          if (error instanceof TerminalEventError) {
+            throw error;
+          }
+          throw new TerminalEventError(errorMessage);
+        }
+      }
+
+      const postProcessing = input.eventBus.getDmMessageState(payload.messageId);
+      if (!postProcessing || postProcessing.terminalFailed || postProcessing.checkApplied) {
+        return;
+      }
+
       try {
-        await message.react(EYE_EMOJI);
-        input.eventBus.markEyeApplied(payload.messageId);
+        await message.react(CHECK_EMOJI);
+        input.eventBus.markCheckApplied(payload.messageId);
       } catch (error) {
         const errorMessage = toErrorMessage(error);
-        console.warn(`[discord] 👀 reaction failed message=${payload.messageId}: ${errorMessage}`);
+        console.warn(`[discord] ✅ reaction failed message=${payload.messageId}: ${errorMessage}`);
         if (isTerminalDiscordError(error)) {
-          input.eventBus.markDmTerminalFailure(payload.messageId, errorMessage);
           throw new TerminalEventError(errorMessage);
         }
         throw new RetryableEventError(errorMessage);
       }
-    }
-
-    const refreshed = input.eventBus.getDmMessageState(payload.messageId);
-    if (!refreshed || refreshed.terminalFailed) {
-      return;
-    }
-
-    if (!refreshed.processingDone) {
-      try {
-        await processDmMessage(message);
-        input.eventBus.markProcessingDone(payload.messageId);
-      } catch (error) {
-        const errorMessage = toErrorMessage(error);
-        input.eventBus.setDmLastError(payload.messageId, errorMessage);
-        if (error instanceof RetryableEventError) {
-          throw error;
-        }
-
-        input.eventBus.markDmTerminalFailure(payload.messageId, errorMessage);
-        try {
-          await message.react(ERROR_EMOJI);
-        } catch (reactError) {
-          console.warn(
-            `[discord] ❌ reaction failed message=${payload.messageId}: ${toErrorMessage(reactError)}`,
-          );
-        }
-        throw error;
-      }
-    }
-
-    const postProcessing = input.eventBus.getDmMessageState(payload.messageId);
-    if (!postProcessing || postProcessing.terminalFailed || postProcessing.checkApplied) {
-      return;
-    }
-
-    try {
-      await message.react(CHECK_EMOJI);
-      input.eventBus.markCheckApplied(payload.messageId);
     } catch (error) {
       const errorMessage = toErrorMessage(error);
-      console.warn(`[discord] ✅ reaction failed message=${payload.messageId}: ${errorMessage}`);
-      if (isTerminalDiscordError(error)) {
-        input.eventBus.markDmTerminalFailure(payload.messageId, errorMessage);
+      input.eventBus.setDmLastError(payload.messageId, errorMessage);
+      const classification = classifyDmIncomingError(error);
+      if (classification === "terminal") {
+        markDmTerminalFailureIfNeeded(
+          payload.messageId,
+          errorMessage,
+          error instanceof TerminalEventError ? error.message : "classified_terminal",
+        );
+        if (error instanceof TerminalEventError) {
+          throw error;
+        }
         throw new TerminalEventError(errorMessage);
+      }
+      if (error instanceof RetryableEventError) {
+        throw error;
       }
       throw new RetryableEventError(errorMessage);
     }
@@ -552,20 +635,15 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
           if (existing?.processingDone || existing?.terminalFailed) {
             continue;
           }
-          if (input.eventBus.hasActiveDmIncomingEvent(message.id)) {
-            continue;
-          }
-
-          input.eventBus.publish({
-            type: BOT_EVENT_DM_INCOMING,
-            lane: "recovery",
-            payload: {
+          enqueueDmIncomingIfIdle(
+            {
               messageId: message.id,
               channelId: message.channelId,
               authorId: message.author.id,
-            } satisfies DmIncomingEventPayload,
-            priority: 5,
-          });
+            },
+            "recovery",
+            5,
+          );
         }
 
         const newest: Message<boolean> | undefined = ordered[ordered.length - 1];
@@ -581,21 +659,23 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
   async function handleReconcileRun(payload: DmReconcileRunEventPayload): Promise<void> {
     const missingEye = input.eventBus.listDmMissingEye(50);
     const missingCheck = input.eventBus.listDmMissingCheck(50);
-    for (const entry of [...missingEye, ...missingCheck]) {
-      if (input.eventBus.hasActiveDmIncomingEvent(entry.messageId)) {
+
+    for (const entry of missingEye) {
+      const latest = input.eventBus.getDmMessageState(entry.messageId);
+      if (!latest || latest.terminalFailed || latest.eyeApplied) {
         continue;
       }
-      input.eventBus.publish({
-        type: BOT_EVENT_DM_INCOMING,
-        lane: "interactive",
-        payload: {
-          messageId: entry.messageId,
-          channelId: entry.channelId,
-          authorId: entry.authorId,
-        } satisfies DmIncomingEventPayload,
-        priority: 15,
-      });
+      enqueueDmIncomingIfIdle(entry, "interactive", 15);
     }
+
+    for (const entry of missingCheck) {
+      const latest = input.eventBus.getDmMessageState(entry.messageId);
+      if (!latest || latest.terminalFailed || !latest.processingDone || latest.checkApplied) {
+        continue;
+      }
+      enqueueDmIncomingIfIdle(entry, "interactive", 15);
+    }
+
     if (missingEye.length > 0 || missingCheck.length > 0) {
       console.log(
         `[reconcile] reason=${payload.reason} missing_eye=${missingEye.length} missing_check=${missingCheck.length}`,
@@ -645,6 +725,25 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
     }
   }
 
+  function settleDmIncomingTerminalFailure(
+    event: EventBusEvent,
+    errorMessage: string,
+    reason: string,
+  ): void {
+    if (event.type !== BOT_EVENT_DM_INCOMING) {
+      return;
+    }
+    if (!isDmIncomingPayload(event.payload)) {
+      return;
+    }
+    input.eventBus.upsertDmMessage(
+      event.payload.messageId,
+      event.payload.channelId,
+      event.payload.authorId,
+    );
+    markDmTerminalFailureIfNeeded(event.payload.messageId, errorMessage, reason);
+  }
+
   async function runWorkerLoop(): Promise<void> {
     while (running) {
       if (!input.connection.isReady()) {
@@ -686,6 +785,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
         const attemptNumber = event.attemptCount + 1;
 
         if (error instanceof TerminalEventError) {
+          settleDmIncomingTerminalFailure(event, errorMessage, "worker_terminal_error");
           input.eventBus.markDead(event.id, errorMessage);
           console.error(
             `[event-bus] dead event=${event.type} id=${event.id} reason=${errorMessage}`,
@@ -694,6 +794,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
         }
 
         if (isTerminalDiscordError(error)) {
+          settleDmIncomingTerminalFailure(event, errorMessage, "worker_discord_terminal_error");
           input.eventBus.markDead(event.id, errorMessage);
           console.error(`[event-bus] dead(discord-terminal) type=${event.type} id=${event.id}`);
           continue;
