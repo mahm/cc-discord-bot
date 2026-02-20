@@ -24,6 +24,7 @@ interface ClaudeJob {
 
 const claudeQueue: ClaudeJob[] = [];
 let queueWorkerRunning = false;
+let cachedSandboxId: string | null = null;
 const DISCORD_USER_ID_PATTERN = /^\d{17,20}$/;
 const FIXED_CLAUDE_ENV_KEYS = ["FORCE_COLOR", "CLAUDECODE"] as const;
 
@@ -139,11 +140,115 @@ export async function getSessionId(config: Config): Promise<string | null> {
   return readSessionId(config);
 }
 
+async function readSandboxId(config: Config): Promise<string | null> {
+  try {
+    const content = await readFile(config.sandboxIdFile, "utf-8");
+    const id = content.trim();
+    return id && /^[a-f0-9]{12,64}$/i.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeSandboxId(config: Config, sandboxId: string): Promise<void> {
+  await mkdir(config.sessionDir, { recursive: true });
+  await writeFile(config.sandboxIdFile, sandboxId, "utf-8");
+}
+
+async function clearSandboxId(config: Config): Promise<void> {
+  cachedSandboxId = null;
+  try {
+    await writeFile(config.sandboxIdFile, "", "utf-8");
+  } catch {
+    // File might not exist yet
+  }
+}
+
+const SANDBOX_GONE_PATTERNS = ["No such container", "is not running"];
+
+function isSandboxGoneError(message: string): boolean {
+  return SANDBOX_GONE_PATTERNS.some((pattern) => message.includes(pattern));
+}
+
+async function findSandboxForWorkspace(workspace: string): Promise<string | null> {
+  const lsProc = Bun.spawn(["docker", "sandbox", "ls", "-q"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+  });
+  const lsOut = await new Response(lsProc.stdout).text();
+  if ((await lsProc.exited) !== 0) return null;
+
+  const ids = lsOut
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  for (const id of ids) {
+    const inspProc = Bun.spawn(["docker", "sandbox", "inspect", id], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    const inspOut = await new Response(inspProc.stdout).text();
+    if ((await inspProc.exited) !== 0) continue;
+
+    try {
+      const data = JSON.parse(inspOut);
+      const entry = Array.isArray(data) ? data[0] : data;
+      if (entry?.workspace === workspace) return id;
+    } catch {}
+  }
+  return null;
+}
+
+async function removeSandbox(sandboxId: string): Promise<void> {
+  const stopProc = Bun.spawn(["docker", "sandbox", "stop", sandboxId], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+  });
+  await stopProc.exited;
+
+  const rmProc = Bun.spawn(["docker", "sandbox", "rm", sandboxId], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+  });
+  const rmExit = await rmProc.exited;
+  if (rmExit !== 0) {
+    const stderr = await new Response(rmProc.stderr).text();
+    console.warn(`[claude] Failed to remove sandbox ${sandboxId}: ${stderr.trim()}`);
+  }
+}
+
 async function ensureClaudeSandbox(config: Config): Promise<string> {
+  // 1. メモリキャッシュ → 2. ディスク → 3. 新規作成
+  if (cachedSandboxId) {
+    return cachedSandboxId;
+  }
+
+  const diskId = await readSandboxId(config);
+  if (diskId) {
+    cachedSandboxId = diskId;
+    return diskId;
+  }
+
   const proc = Bun.spawn(
-    ["docker", "sandbox", "run", "--detached", "--workspace", config.projectRoot, "claude"],
+    [
+      "docker",
+      "sandbox",
+      "run",
+      "--detached",
+      "--credentials",
+      "host",
+      "--workspace",
+      config.projectRoot,
+      "claude",
+    ],
     {
       cwd: config.projectRoot,
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env },
@@ -157,9 +262,21 @@ async function ensureClaudeSandbox(config: Config): Promise<string> {
   const exitCode = await proc.exited;
 
   if (exitCode !== 0) {
-    const errorMsg =
-      stderr.trim() || stdout.trim() || `Failed to ensure Docker sandbox (exit code ${exitCode})`;
-    throw new Error(errorMsg);
+    const errorOutput = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+
+    // credentials 競合: 既存sandbox除去 → 再作成
+    if (errorOutput.includes("already exists for this workspace, but with different credentials")) {
+      console.warn("[claude] Credentials conflict detected. Removing existing sandbox.");
+      const existingId = await findSandboxForWorkspace(config.projectRoot);
+      if (existingId) {
+        await removeSandbox(existingId);
+        console.log(`[claude] Removed conflicting sandbox: ${existingId}`);
+      }
+      // 再帰で再試行(競合sandboxが除去済みなので新規作成に進む)
+      return ensureClaudeSandbox(config);
+    }
+
+    throw new Error(errorOutput || `Failed to ensure Docker sandbox (exit code ${exitCode})`);
   }
 
   const lines = stdout
@@ -170,9 +287,24 @@ async function ensureClaudeSandbox(config: Config): Promise<string> {
 
   if (!sandboxId || !/^[a-f0-9]{12,64}$/i.test(sandboxId)) {
     const joined = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+
+    // credentials 競合(exit code 0 でもここに来る場合がある)
+    if (joined.includes("already exists for this workspace, but with different credentials")) {
+      console.warn("[claude] Credentials conflict detected. Removing existing sandbox.");
+      const existingId = await findSandboxForWorkspace(config.projectRoot);
+      if (existingId) {
+        await removeSandbox(existingId);
+        console.log(`[claude] Removed conflicting sandbox: ${existingId}`);
+      }
+      return ensureClaudeSandbox(config);
+    }
+
     throw new Error(`Failed to resolve Docker sandbox ID. Output: ${joined.slice(0, 500)}`);
   }
 
+  cachedSandboxId = sandboxId;
+  await writeSandboxId(config, sandboxId);
+  console.log(`[claude] Sandbox acquired and cached: ${sandboxId}`);
   return sandboxId;
 }
 
@@ -182,10 +314,6 @@ async function runClaudeCommand(
   options?: SendToClaudeOptions,
   retried = false,
 ): Promise<ClaudeResponse> {
-  if (!Bun.which("docker")) {
-    throw new Error("Docker CLI is required. Install Docker Desktop and enable Docker Sandbox.");
-  }
-
   const sessionId = await readSessionId(config);
 
   const now = new Date();
@@ -220,36 +348,70 @@ async function runClaudeCommand(
     prompt,
   });
 
-  const sandboxId = await ensureClaudeSandbox(config);
-  const dockerEnv = buildDockerExecEnvArgs({
-    extraEnv: config.claudeEnv,
-  });
-  const dockerExecArgs = [
-    "exec",
-    "-w",
-    config.projectRoot,
-    ...dockerEnv.args,
-    sandboxId,
-    "claude",
-    ...args,
-  ];
+  let spawnArgs: string[];
+  let logPrefix: string;
 
-  if (dockerEnv.ignoredKeys.length > 0) {
-    console.warn(
-      `[claude] Ignored env keys from settings.bot.json because they are reserved: ${dockerEnv.ignoredKeys.join(", ")}`,
+  if (!config.enableSandbox) {
+    // ホストで直接 claude を実行
+    spawnArgs = ["claude", ...args];
+    const envKeys = Object.keys(config.claudeEnv).sort();
+    logPrefix = `[claude] source=${source} mode=host env_keys=${envKeys.join(",") || "(none)"}`;
+    console.log(
+      `${logPrefix} $ claude ${args.map((a, i) => (i === args.length - 1 ? `${a.slice(0, 100)}...` : a)).join(" ")}`,
+    );
+  } else {
+    // Docker sandbox 経由
+    if (!Bun.which("docker")) {
+      throw new Error("Docker CLI is required. Install Docker Desktop and enable Docker Sandbox.");
+    }
+
+    const sandboxId = await ensureClaudeSandbox(config);
+    const dockerEnv = buildDockerExecEnvArgs({
+      extraEnv: config.claudeEnv,
+    });
+    const dockerExecArgs = [
+      "exec",
+      "-w",
+      config.projectRoot,
+      ...dockerEnv.args,
+      sandboxId,
+      "claude",
+      ...args,
+    ];
+
+    if (dockerEnv.ignoredKeys.length > 0) {
+      console.warn(
+        `[claude] Ignored env keys from settings.bot.json because they are reserved: ${dockerEnv.ignoredKeys.join(", ")}`,
+      );
+    }
+
+    spawnArgs = ["docker", ...dockerExecArgs];
+    const logArgs = args.map((a, i) => (i === args.length - 1 ? `${a.slice(0, 100)}...` : a));
+    logPrefix = `[claude] source=${source} mode=sandbox env_keys=${dockerEnv.envKeys.join(",")}`;
+    console.log(
+      `${logPrefix} $ docker exec -w ${config.projectRoot} ${sandboxId} claude ${logArgs.join(" ")}`,
     );
   }
 
-  const logArgs = args.map((a, i) => (i === args.length - 1 ? `${a.slice(0, 100)}...` : a));
-  console.log(
-    `[claude] source=${source} env_keys=${dockerEnv.envKeys.join(",")} $ docker exec -w ${config.projectRoot} ${sandboxId} claude ${logArgs.join(" ")}`,
-  );
+  const spawnEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") {
+      spawnEnv[key] = value;
+    }
+  }
+  if (!config.enableSandbox) {
+    spawnEnv.FORCE_COLOR = "0";
+    spawnEnv.CLAUDECODE = "";
+    for (const [key, value] of Object.entries(config.claudeEnv)) {
+      spawnEnv[key] = value;
+    }
+  }
 
-  const proc = Bun.spawn(["docker", ...dockerExecArgs], {
+  const proc = Bun.spawn(spawnArgs, {
     cwd: config.projectRoot,
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env },
+    env: spawnEnv,
   });
 
   const timeout = setTimeout(() => {
@@ -267,6 +429,14 @@ async function runClaudeCommand(
 
     if (exitCode !== 0) {
       const errorMsg = stderr.trim() || stdout.trim() || `Claude CLI exited with code ${exitCode}`;
+
+      // sandbox が消失した場合: キャッシュ無効化 + セッションクリア + リトライ
+      if (!!config.enableSandbox && !retried && isSandboxGoneError(errorMsg)) {
+        console.warn("[claude] Sandbox is no longer available. Invalidating cache and retrying.");
+        await clearSandboxId(config);
+        await clearSession(config);
+        return runClaudeCommand(message, config, options, true);
+      }
 
       if (sessionId && !retried && errorMsg.includes("No conversation found with session ID")) {
         console.warn(
@@ -348,4 +518,15 @@ export async function sendToClaude(
     claudeQueue.push({ message, config, options, resolve, reject });
     void runQueue();
   });
+}
+
+const CLAUDE_AUTH_ERROR_PATTERNS = [
+  "Expected token to be set for this request, but none was present",
+  "Not logged in",
+  "Please run /login",
+];
+
+export function isClaudeAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return CLAUDE_AUTH_ERROR_PATTERNS.some((pattern) => message.includes(pattern));
 }

@@ -22,6 +22,7 @@ const envKeySchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid env k
 const botSettingsSchema = z
   .object({
     "bypass-mode": z.boolean().optional(),
+    enable_sandbox: z.boolean().optional(),
     claude_timeout_seconds: z
       .number()
       .int()

@@ -265,8 +265,46 @@ DM にファイルを添付して送ることができます。
 |------|------|
 | Bot がオフラインのまま | `.env` の `DISCORD_BOT_TOKEN` が正しいか、Bot が有効になっているか確認 |
 | DM に反応しない | `DISCORD_ALLOWED_USER_IDS` の値を確認 |
-| Claude の実行でエラーになる | `docker sandbox ls` で Sandbox の状態を確認。`Not logged in` と出る場合は `docker sandbox run --workspace "$(pwd)" claude` で `/login` を実行 |
+| `Expected token to be set for this request, but none was present` | Docker Sandbox 内の Claude Code が未認証。**Bot が Discord DM でも通知します**。下記「Claude Code 認証エラーの復旧」を参照 |
+| Bot 起動直後にプロセスが終了する | `.env` の `DISCORD_BOT_TOKEN` が未設定。`.env` を確認して Bot を再起動 |
 | スケジュールが動かない | `.claude/settings.bot.json` の JSON 構文・cron 式・timezone を確認 |
 | セッションの挙動がおかしい | `!reset` でセッションを初期化 |
+
+### Claude Code 認証エラーの復旧
+
+ログや Discord DM に `⚠️ Claude Code の認証が切れています` または
+`Expected token to be set for this request, but none was present` が表示された場合、
+Docker Sandbox 内の Claude Code（Anthropic API）の認証切れが原因です。
+Discord Bot Token とは別の問題です。
+
+#### 復旧手順
+
+```bash
+# 1. Bot を停止する（tmux で起動している場合）
+tmux kill-session -t cc-discord-bot
+
+# 2. Docker Sandbox に対話モードで入る
+docker sandbox run --workspace "$(pwd)" claude
+
+# 3. Claude Code の対話シェルが開いたら /login を実行
+/login
+# → ブラウザが開くので Anthropic アカウントでログイン
+# → 「Login successful」と表示されたら Ctrl+C で終了
+
+# 4. Bot を再起動する
+tmux new -d -s cc-discord-bot "bun run .claude/skills/cc-discord-bot/scripts/src/main.ts"
+
+# 5. ログで接続成功を確認する
+tmux attach -t cc-discord-bot
+# [discord-connection] event=connected が出れば正常
+# Ctrl+B → D でデタッチ（セッションは維持）
+```
+
+#### 通知の仕組み
+
+このエラーが発生すると、Bot は自動的に Discord DM で通知と復旧手順を送ります。
+
+- **DM への返信時**: ❌ リアクション + 日本語で復旧手順を送信
+- **スケジューラー実行時**: エラーをログに記録したうえで、Discord DM で通知
 
 Discord接続切れに対しては、自動再接続（指数バックオフ: 1秒→2秒→4秒…最大60秒）を継続します。さらに専用heartbeatが `not_ready` / `stale gateway` / 連続高ping を検知した場合は強制再接続を実行します。`[discord-connection]` / `[scheduler]` ログを確認してください。
