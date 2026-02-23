@@ -558,7 +558,12 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       throw new TerminalEventError(`Schedule not found: ${payload.scheduleName}`);
     }
 
-    const response = await runScheduleByName(payload.scheduleName, settings, input.config);
+    const response = await runScheduleByName(
+      payload.scheduleName,
+      settings,
+      input.config,
+      input.eventBus,
+    );
     const shouldSkip = schedule.skippable && isSkipResponse(response);
     if (shouldSkip || !schedule.discord_notify) {
       return;

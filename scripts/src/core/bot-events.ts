@@ -18,6 +18,7 @@ export interface DmIncomingEventPayload {
   messageId: string;
   channelId: string;
   authorId: string;
+  messageText?: string;
 }
 
 export interface OutboundDmAttachmentPayload {

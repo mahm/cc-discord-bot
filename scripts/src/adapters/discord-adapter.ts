@@ -49,6 +49,7 @@ export function createBot(config: Config, options: BotOptions): Client {
       messageId: message.id,
       channelId: message.channelId,
       authorId: message.author.id,
+      messageText: message.content.trim() || undefined,
     };
 
     try {

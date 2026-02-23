@@ -14,6 +14,7 @@ const scheduleSchema = z
     discord_notify: z.boolean(),
     prompt_file: z.string().min(1).optional(),
     skippable: z.boolean().optional(),
+    session_mode: z.enum(["main", "isolated"]).default("main"),
   })
   .strict();
 

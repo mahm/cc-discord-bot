@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { type AttachmentInput, buildAttachmentPromptBlock } from "./attachments-adapter";
 import type { Config } from "./config-adapter";
 
@@ -7,11 +8,17 @@ export interface ClaudeResponse {
   sessionId: string;
 }
 
+export interface SessionTarget {
+  mode: "main" | "isolated";
+  scheduleName?: string;
+}
+
 export interface SendToClaudeOptions {
   bypassMode?: boolean;
   attachments?: AttachmentInput[];
   source?: "dm" | "scheduler" | "manual";
   authorId?: string;
+  sessionTarget?: SessionTarget;
 }
 
 interface ClaudeJob {
@@ -114,30 +121,49 @@ export function buildDockerExecEnvArgs(input: { extraEnv: Record<string, string>
   return { args, envKeys, ignoredKeys };
 }
 
-async function readSessionId(config: Config): Promise<string | null> {
+function resolveSessionFile(config: Config, target?: SessionTarget): string {
+  if (!target || target.mode === "main") {
+    return config.sessionFile;
+  }
+  const safeName = (target.scheduleName ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+  return path.join(config.sessionsDir, `${safeName}.txt`);
+}
+
+function resolveSessionDir(config: Config, target?: SessionTarget): string {
+  if (!target || target.mode === "main") {
+    return config.sessionDir;
+  }
+  return config.sessionsDir;
+}
+
+async function readSessionId(config: Config, target?: SessionTarget): Promise<string | null> {
   try {
-    const content = await readFile(config.sessionFile, "utf-8");
+    const content = await readFile(resolveSessionFile(config, target), "utf-8");
     return content.trim() || null;
   } catch {
     return null;
   }
 }
 
-async function writeSessionId(config: Config, sessionId: string): Promise<void> {
-  await mkdir(config.sessionDir, { recursive: true });
-  await writeFile(config.sessionFile, sessionId, "utf-8");
+async function writeSessionId(
+  config: Config,
+  sessionId: string,
+  target?: SessionTarget,
+): Promise<void> {
+  await mkdir(resolveSessionDir(config, target), { recursive: true });
+  await writeFile(resolveSessionFile(config, target), sessionId, "utf-8");
 }
 
-export async function clearSession(config: Config): Promise<void> {
+export async function clearSession(config: Config, target?: SessionTarget): Promise<void> {
   try {
-    await writeFile(config.sessionFile, "", "utf-8");
+    await writeFile(resolveSessionFile(config, target), "", "utf-8");
   } catch {
     // File might not exist yet, that's fine
   }
 }
 
-export async function getSessionId(config: Config): Promise<string | null> {
-  return readSessionId(config);
+export async function getSessionId(config: Config, target?: SessionTarget): Promise<string | null> {
+  return readSessionId(config, target);
 }
 
 async function readSandboxId(config: Config): Promise<string | null> {
@@ -314,7 +340,8 @@ async function runClaudeCommand(
   options?: SendToClaudeOptions,
   retried = false,
 ): Promise<ClaudeResponse> {
-  const sessionId = await readSessionId(config);
+  const sessionTarget = options?.sessionTarget;
+  const sessionId = await readSessionId(config, sessionTarget);
 
   const now = new Date();
   const timeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -434,7 +461,7 @@ async function runClaudeCommand(
       if (!!config.enableSandbox && !retried && isSandboxGoneError(errorMsg)) {
         console.warn("[claude] Sandbox is no longer available. Invalidating cache and retrying.");
         await clearSandboxId(config);
-        await clearSession(config);
+        await clearSession(config, sessionTarget);
         return runClaudeCommand(message, config, options, true);
       }
 
@@ -442,7 +469,7 @@ async function runClaudeCommand(
         console.warn(
           "[claude] Session was not found in sandbox. Clearing session and retrying once.",
         );
-        await clearSession(config);
+        await clearSession(config, sessionTarget);
         return runClaudeCommand(message, config, options, true);
       }
 
@@ -467,7 +494,7 @@ async function runClaudeCommand(
 
     const newSessionId = parsed.session_id;
     if (newSessionId) {
-      await writeSessionId(config, newSessionId);
+      await writeSessionId(config, newSessionId, sessionTarget);
     }
 
     return {

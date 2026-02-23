@@ -16,8 +16,10 @@ dotenvConfig({ path: path.join(PROJECT_ROOT, ".env") });
 
 const STATE_DIR = path.join(PROJECT_ROOT, "tmp", "cc-discord-bot");
 const SESSION_FILE = path.join(STATE_DIR, "session_id.txt");
+const SESSIONS_DIR = path.join(STATE_DIR, "sessions");
 const SANDBOX_ID_FILE = path.join(STATE_DIR, "sandbox_id.txt");
 const EVENT_BUS_DB_FILE = path.join(STATE_DIR, "event-bus.sqlite3");
+const HANDOFFS_DIR = path.join(STATE_DIR, "handoffs");
 const ATTACHMENT_ROOT_DIR = path.join(STATE_DIR, "attachments");
 const MAX_ATTACHMENT_BYTES_PER_FILE = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES_PER_MESSAGE = 50 * 1024 * 1024;
@@ -45,6 +47,8 @@ export interface Config {
   maxAttachmentBytesPerMessage: number;
   attachmentRetentionMs: number;
   attachmentDownloadTimeoutMs: number;
+  sessionsDir: string;
+  handoffsDir: string;
 }
 
 export function loadConfig(): Config {
@@ -91,6 +95,8 @@ export function loadConfig(): Config {
     maxAttachmentBytesPerMessage: MAX_ATTACHMENT_BYTES_PER_MESSAGE,
     attachmentRetentionMs: ATTACHMENT_RETENTION_MS,
     attachmentDownloadTimeoutMs: ATTACHMENT_DOWNLOAD_TIMEOUT_MS,
+    sessionsDir: SESSIONS_DIR,
+    handoffsDir: HANDOFFS_DIR,
   };
 }
 

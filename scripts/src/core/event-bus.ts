@@ -61,6 +61,25 @@ export interface DmMessageState {
   lastError: string | null;
 }
 
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  text: string;
+  timestamp: number;
+}
+
+export function formatConversationAsMarkdown(messages: ConversationMessage[]): string {
+  if (messages.length === 0) return "(最近のDM会話はありません)";
+  return messages
+    .map((msg) => {
+      const d = new Date(msg.timestamp);
+      const time = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      const label = msg.role === "user" ? "user" : "assistant";
+      const preview = msg.text.length > 500 ? `${msg.text.slice(0, 500)}...` : msg.text;
+      return `### ${label} (${time})\n${preview}`;
+    })
+    .join("\n\n");
+}
+
 function laneRank(lane: BotEventLane): number {
   switch (lane) {
     case "interactive":
@@ -564,6 +583,36 @@ export class SqliteEventBus {
       counts[row.status] = row.count;
     }
     return counts;
+  }
+
+  getRecentDmConversation(limit: number): ConversationMessage[] {
+    const rows = this.db
+      .query(
+        `
+          SELECT role, text, timestamp FROM (
+            SELECT 'user' as role,
+                   json_extract(payload_json, '$.messageText') as text,
+                   created_at as timestamp
+            FROM events
+            WHERE type = 'dm.incoming'
+              AND status = 'done'
+              AND json_extract(payload_json, '$.messageText') IS NOT NULL
+            UNION ALL
+            SELECT 'assistant' as role,
+                   json_extract(payload_json, '$.text') as text,
+                   created_at as timestamp
+            FROM events
+            WHERE type = 'outbound.dm.request'
+              AND status = 'done'
+              AND json_extract(payload_json, '$.source') = 'dm_reply'
+            ORDER BY timestamp DESC
+            LIMIT ?
+          )
+          ORDER BY timestamp ASC
+        `,
+      )
+      .all(Math.max(1, limit)) as ConversationMessage[];
+    return rows;
   }
 
   getDbPath(): string {
