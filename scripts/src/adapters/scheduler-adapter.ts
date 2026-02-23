@@ -22,13 +22,25 @@ function expandPrompt(template: string): string {
 }
 
 async function buildPrompt(schedule: Schedule, config: Config): Promise<string> {
-  let prompt = schedule.prompt;
+  const parts: string[] = [];
+
+  // 教訓ファイルを埋め込み(存在すれば)
+  const lessonsPath = path.join(config.projectRoot, "AGENT_LESSONS.md");
+  try {
+    const lessons = await readFile(lessonsPath, "utf-8");
+    parts.push(lessons);
+  } catch {
+    // ファイルがなければスキップ
+  }
+
   if (schedule.prompt_file) {
     const filePath = path.join(config.projectRoot, schedule.prompt_file);
     const fileContent = await readFile(filePath, "utf-8");
-    prompt = `${fileContent}\n\n---\n\n${prompt}`;
+    parts.push(fileContent);
   }
-  return expandPrompt(prompt);
+
+  parts.push(schedule.prompt);
+  return expandPrompt(parts.join("\n\n---\n\n"));
 }
 
 async function runSchedule(
