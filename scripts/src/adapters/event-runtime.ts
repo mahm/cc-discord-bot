@@ -15,12 +15,8 @@ import {
 import { runWithEmptyResponseRetry } from "../core/claude-retry";
 import { classifyDiscordError, isTerminalDiscordError } from "../core/discord-errors";
 import { type EventBusEvent, SqliteEventBus } from "../core/event-bus";
-import {
-  EMPTY_RESPONSE_FALLBACK_MESSAGE,
-  isSkipResponse,
-  sendChunksWithFallback,
-  splitMessage,
-} from "../core/message-format";
+import { isSkipResponse, sendChunksWithFallback, splitMessage } from "../core/message-format";
+import { resolveOutboundDmDeliveryPolicy } from "../core/outbound-dm-policy";
 import {
   AttachmentError,
   cleanupExpiredAttachments,
@@ -190,13 +186,15 @@ async function sendUserMessageWithOptionalFiles(
   ) => Promise<unknown>,
   text: string,
   files: Array<{ path: string; name: string }>,
+  options: {
+    source: "dm" | "scheduler";
+    fallbackMessage?: string;
+    context?: string;
+  },
 ): Promise<void> {
   const normalizedFiles = files.filter((file) => file.path.trim().length > 0);
   if (normalizedFiles.length === 0) {
-    await sendChunksWithFallback((chunk) => sender(chunk), text, {
-      fallbackMessage: EMPTY_RESPONSE_FALLBACK_MESSAGE,
-      source: "dm",
-    });
+    await sendChunksWithFallback((chunk) => sender(chunk), text, options);
     return;
   }
 
@@ -281,6 +279,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       path: String(file.path ?? ""),
       name: String(file.name ?? "file"),
     }));
+    const deliveryPolicy = resolveOutboundDmDeliveryPolicy(payload.source);
 
     if (payload.channelId) {
       const channel = await input.client.channels.fetch(payload.channelId);
@@ -292,8 +291,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       }
 
       await sendChunksWithFallback((chunk) => channel.send(chunk), payload.text, {
-        fallbackMessage: EMPTY_RESPONSE_FALLBACK_MESSAGE,
-        source: "dm",
+        ...deliveryPolicy,
         context: payload.context,
       });
       return;
@@ -304,7 +302,10 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       throw new TerminalEventError("outbound.dm.request requires userId or channelId");
     }
     const user = await input.client.users.fetch(userId);
-    await sendUserMessageWithOptionalFiles((message) => user.send(message), payload.text, files);
+    await sendUserMessageWithOptionalFiles((message) => user.send(message), payload.text, files, {
+      ...deliveryPolicy,
+      context: payload.context,
+    });
   }
 
   async function processDmMessage(message: Message<boolean>): Promise<void> {

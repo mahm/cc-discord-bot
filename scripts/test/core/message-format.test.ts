@@ -85,6 +85,23 @@ SD誌のスクショ撮り直し、進んでますかー?`;
 });
 
 describe("sendChunksWithFallback", () => {
+  it("does not send any message when fallback is omitted", async () => {
+    const sent: string[] = [];
+
+    const count = await sendChunksWithFallback(
+      async (chunk) => {
+        sent.push(chunk);
+      },
+      "   ",
+      {
+        source: "scheduler",
+      },
+    );
+
+    expect(count).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
   it("sends fallback when response is empty", async () => {
     const sent: string[] = [];
 
