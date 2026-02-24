@@ -19,6 +19,7 @@ export interface SendToClaudeOptions {
   source?: "dm" | "scheduler" | "manual";
   authorId?: string;
   sessionTarget?: SessionTarget;
+  replyContext?: string;
 }
 
 interface ClaudeJob {
@@ -351,6 +352,9 @@ async function runClaudeCommand(
   const progressHint = buildProgressHint(options?.source, options?.authorId);
   const userInput = trimmedMessage || "(No text message was provided.)";
   const assistantContextParts: string[] = [];
+  if (options?.replyContext) {
+    assistantContextParts.push(options.replyContext);
+  }
   if (progressHint) {
     assistantContextParts.push(progressHint);
   }

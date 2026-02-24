@@ -353,6 +353,22 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
         `Processing message from ${message.author.tag}: ${preview} (attachments=${attachments.length})`,
       );
 
+      // リプライ元メッセージの取得
+      let replyContext: string | undefined;
+      if (message.reference?.messageId) {
+        try {
+          const refMessage = await message.fetchReference();
+          const refContent = refMessage.content.slice(0, 200);
+          if (refContent) {
+            const refTime = refMessage.createdAt;
+            const timeStr = `${refTime.getFullYear()}-${String(refTime.getMonth() + 1).padStart(2, "0")}-${String(refTime.getDate()).padStart(2, "0")} ${String(refTime.getHours()).padStart(2, "0")}:${String(refTime.getMinutes()).padStart(2, "0")}`;
+            replyContext = `[リプライ元 (${timeStr})] ${refContent}`;
+          }
+        } catch (error) {
+          console.warn(`[discord] Failed to fetch reply reference: ${toErrorMessage(error)}`);
+        }
+      }
+
       const { result, attempts } = await runWithEmptyResponseRetry(
         async () =>
           await sendToClaude(content, input.config, {
@@ -360,6 +376,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
             attachments,
             source: "dm",
             authorId: message.author.id,
+            replyContext,
           }),
         {
           source: "dm",
