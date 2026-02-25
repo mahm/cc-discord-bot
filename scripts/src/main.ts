@@ -2,21 +2,19 @@ import { randomUUID } from "node:crypto";
 import { applyBotSettingsToConfig, loadConfig } from "./adapters/config-adapter";
 import { createBot } from "./adapters/discord-adapter";
 import { createEventRuntime } from "./adapters/event-runtime";
-import {
-  loadBotSettings,
-  runScheduleByName,
-  startSchedulerWithPublisher,
-} from "./adapters/scheduler-adapter";
+import { runScheduleByName, startSchedulerWithPublisher } from "./adapters/scheduler-adapter";
 import { prepareDmFiles } from "./adapters/send-dm-adapter";
 import {
   BOT_EVENT_DM_RECOVER_RUN,
   BOT_EVENT_OUTBOUND_DM_REQUEST,
   BOT_EVENT_SCHEDULER_TRIGGERED,
+  type BotEventLane,
   type DmRecoverRunEventPayload,
   type OutboundDmRequestPayload,
 } from "./core/bot-events";
 import { createDiscordConnectionManager } from "./core/discord-connection";
 import { SqliteEventBus } from "./core/event-bus";
+import { loadBotSettings } from "./core/runtime-settings";
 import { parseSendCommandArgs, SEND_USAGE } from "./core/send-command";
 
 const config = loadConfig();
@@ -74,7 +72,7 @@ if (subcommand === "send") {
   }
 
   try {
-    const settings = await loadBotSettings(config);
+    const settings = await loadBotSettings(config.projectRoot);
     applyBotSettingsToConfig(config, settings);
     const result = await runScheduleByName(name, settings, config);
     console.log(result);
@@ -84,7 +82,7 @@ if (subcommand === "send") {
   }
 } else {
   // Bot常駐モード(デフォルト): bun run src/main.ts
-  const settings = await loadBotSettings(config);
+  const settings = await loadBotSettings(config.projectRoot);
   applyBotSettingsToConfig(config, settings);
   const eventBus = new SqliteEventBus(config.eventBusDbFile);
   const client = createBot(config, { eventBus });
@@ -162,9 +160,12 @@ if (subcommand === "send") {
   // Start scheduler
   startSchedulerWithPublisher(settings, (payload) => {
     try {
+      const schedule = settings.schedules.find((entry) => entry.name === payload.scheduleName);
+      const lane: BotEventLane =
+        schedule?.session_mode === "isolated" ? "scheduled_isolated" : "scheduled";
       eventBus.publish({
         type: BOT_EVENT_SCHEDULER_TRIGGERED,
-        lane: "scheduled",
+        lane,
         payload,
         priority: 0,
       });

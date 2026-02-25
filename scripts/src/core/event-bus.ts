@@ -50,6 +50,10 @@ export interface PublishEventInput {
   availableAt?: number;
 }
 
+export interface ClaimNextOptions {
+  lanes?: BotEventLane[];
+}
+
 export interface DmMessageState {
   messageId: string;
   channelId: string;
@@ -88,8 +92,10 @@ function laneRank(lane: BotEventLane): number {
       return 1;
     case "scheduled":
       return 2;
-    default:
+    case "scheduled_isolated":
       return 3;
+    default:
+      return 4;
   }
 }
 
@@ -215,28 +221,32 @@ export class SqliteEventBus {
     }
   }
 
-  claimNext(workerId: string): EventBusEvent | null {
+  claimNext(workerId: string, options?: ClaimNextOptions): EventBusEvent | null {
     const now = Date.now();
+    const lanes = options?.lanes ? [...new Set(options.lanes)] : [];
+    const laneFilterSql =
+      lanes.length > 0 ? ` AND lane IN (${lanes.map(() => "?").join(",")})` : "";
     return this.db.transaction(() => {
       const rows = this.db
         .query(
           `
             SELECT id, type, lane, priority, payload_json, attempt_count, status, available_at, created_at
             FROM events
-            WHERE status IN ('pending', 'retry') AND available_at <= ?
+            WHERE status IN ('pending', 'retry') AND available_at <= ?${laneFilterSql}
             ORDER BY
               CASE lane
                 WHEN 'interactive' THEN 0
                 WHEN 'recovery' THEN 1
                 WHEN 'scheduled' THEN 2
-                ELSE 3
+                WHEN 'scheduled_isolated' THEN 3
+                ELSE 4
               END ASC,
               priority DESC,
               created_at ASC
             LIMIT 50
           `,
         )
-        .all(now) as EventRow[];
+        .all(now, ...lanes) as EventRow[];
 
       for (const row of rows) {
         const updated = this.db

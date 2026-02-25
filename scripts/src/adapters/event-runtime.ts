@@ -5,6 +5,7 @@ import {
   BOT_EVENT_DM_RECOVER_RUN,
   BOT_EVENT_OUTBOUND_DM_REQUEST,
   BOT_EVENT_SCHEDULER_TRIGGERED,
+  type BotEventLane,
   type DmIncomingEventPayload,
   type DmReconcileRunEventPayload,
   type DmRecoverRunEventPayload,
@@ -18,21 +19,41 @@ import { type EventBusEvent, SqliteEventBus } from "../core/event-bus";
 import { isSkipResponse, sendChunksWithFallback, splitMessage } from "../core/message-format";
 import { resolveOutboundDmDeliveryPolicy } from "../core/outbound-dm-policy";
 import {
+  EVENT_RUNTIME_CONNECTION_WAIT_TIMEOUT_MS,
+  EVENT_RUNTIME_MAX_ATTEMPTS,
+  EVENT_RUNTIME_POLL_INTERVAL_MS,
+  EVENT_RUNTIME_RECONCILE_INTERVAL_MS,
+  EVENT_RUNTIME_STALE_LOCK_TIMEOUT_MS,
+  loadBotSettings,
+  SCHEDULED_ISOLATED_WORKER_COUNT,
+} from "../core/runtime-settings";
+import {
   AttachmentError,
   cleanupExpiredAttachments,
   collectMessageAttachments,
 } from "./attachments-adapter";
 import { clearSession, getSessionId, isClaudeAuthError, sendToClaude } from "./claude-adapter";
 import type { Config } from "./config-adapter";
-import { loadBotSettings, runScheduleByName } from "./scheduler-adapter";
+import { runScheduleByName } from "./scheduler-adapter";
 
+/**
+ * Purpose: Reaction marker shown when DM processing starts.
+ * Unit: Unicode emoji string.
+ * Impact: Visual status indicator in Discord for in-progress messages.
+ */
 const EYE_EMOJI = "\u{1F440}";
+/**
+ * Purpose: Reaction marker shown when DM processing finishes successfully.
+ * Unit: Unicode emoji string.
+ * Impact: Visual status indicator in Discord for completed messages.
+ */
 const CHECK_EMOJI = "\u2705";
+/**
+ * Purpose: Reaction marker shown when DM processing fails terminally.
+ * Unit: Unicode emoji string.
+ * Impact: Visual status indicator in Discord for failed messages.
+ */
 const ERROR_EMOJI = "\u274C";
-const RECONCILE_INTERVAL_MS = 15_000;
-const DEFAULT_POLL_INTERVAL_MS = 250;
-const STALE_LOCK_TIMEOUT_MS = 120_000;
-const MAX_ATTEMPTS = 20;
 
 type ConnectionGuard = {
   isReady(): boolean;
@@ -223,10 +244,35 @@ interface CreateEventRuntimeInput {
   eventBus: SqliteEventBus;
 }
 
+interface EventWorkerSpec {
+  workerId: string;
+  lanes: BotEventLane[];
+  allowStaleRequeue: boolean;
+}
+
+export function buildEventWorkerSpecs(processId: number): EventWorkerSpec[] {
+  const specs: EventWorkerSpec[] = [
+    {
+      workerId: `runtime-main-${processId}`,
+      lanes: ["interactive", "recovery", "scheduled", "system"],
+      allowStaleRequeue: true,
+    },
+  ];
+
+  for (let index = 0; index < SCHEDULED_ISOLATED_WORKER_COUNT; index += 1) {
+    specs.push({
+      workerId: `runtime-isolated-${processId}-${index + 1}`,
+      lanes: ["scheduled_isolated"],
+      allowStaleRequeue: false,
+    });
+  }
+
+  return specs;
+}
+
 export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime {
-  const workerId = `runtime-${process.pid}`;
   let running = false;
-  let workerPromise: Promise<void> | null = null;
+  let workerPromises: Promise<void>[] = [];
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
   let waitingForConnection = false;
 
@@ -569,7 +615,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       return;
     }
 
-    const settings = await loadBotSettings(input.config);
+    const settings = await loadBotSettings(input.config.projectRoot);
     const schedule = settings.schedules.find((entry) => entry.name === payload.scheduleName);
     if (!schedule) {
       throw new TerminalEventError(`Schedule not found: ${payload.scheduleName}`);
@@ -767,7 +813,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
     markDmTerminalFailureIfNeeded(event.payload.messageId, errorMessage, reason);
   }
 
-  async function runWorkerLoop(): Promise<void> {
+  async function runWorkerLoop(spec: EventWorkerSpec): Promise<void> {
     while (running) {
       if (!input.connection.isReady()) {
         if (!waitingForConnection) {
@@ -775,7 +821,9 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
           console.warn("[event-bus] Connection not ready. Pausing event processing.");
         }
 
-        const ready = await input.connection.waitUntilReady(60_000);
+        const ready = await input.connection.waitUntilReady(
+          EVENT_RUNTIME_CONNECTION_WAIT_TIMEOUT_MS,
+        );
         if (!running) {
           break;
         }
@@ -789,14 +837,16 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
         console.log("[event-bus] Connection recovered. Resuming event processing.");
       }
 
-      const requeued = input.eventBus.requeueStaleProcessing(STALE_LOCK_TIMEOUT_MS);
-      if (requeued > 0) {
-        console.warn(`[event-bus] Requeued stale events: ${requeued}`);
+      if (spec.allowStaleRequeue) {
+        const requeued = input.eventBus.requeueStaleProcessing(EVENT_RUNTIME_STALE_LOCK_TIMEOUT_MS);
+        if (requeued > 0) {
+          console.warn(`[event-bus] Requeued stale events: ${requeued}`);
+        }
       }
 
-      const event = input.eventBus.claimNext(workerId);
+      const event = input.eventBus.claimNext(spec.workerId, { lanes: spec.lanes });
       if (!event) {
-        await wait(DEFAULT_POLL_INTERVAL_MS);
+        await wait(EVENT_RUNTIME_POLL_INTERVAL_MS);
         continue;
       }
 
@@ -823,7 +873,7 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
           continue;
         }
 
-        if (attemptNumber >= MAX_ATTEMPTS) {
+        if (attemptNumber >= EVENT_RUNTIME_MAX_ATTEMPTS) {
           input.eventBus.markDead(event.id, `max attempts reached: ${errorMessage}`);
           console.error(
             `[event-bus] dead(max-attempts) type=${event.type} id=${event.id} attempts=${attemptNumber}`,
@@ -848,15 +898,20 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       return;
     }
     running = true;
-    workerPromise = runWorkerLoop().catch((error) => {
-      console.error(`[event-bus] Worker loop crashed: ${toErrorMessage(error)}`);
-      running = false;
-    });
+    const workerSpecs = buildEventWorkerSpecs(process.pid);
+    workerPromises = workerSpecs.map((spec) =>
+      runWorkerLoop(spec).catch((error) => {
+        console.error(
+          `[event-bus] Worker loop crashed (worker=${spec.workerId}): ${toErrorMessage(error)}`,
+        );
+        running = false;
+      }),
+    );
     reconcileTimer = setInterval(() => {
       void enqueueReconcile("timer").catch((error) => {
         console.error(`[event-bus] reconcile enqueue failed: ${toErrorMessage(error)}`);
       });
-    }, RECONCILE_INTERVAL_MS);
+    }, EVENT_RUNTIME_RECONCILE_INTERVAL_MS);
     void enqueueReconcile("startup");
   }
 
@@ -866,8 +921,8 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       clearInterval(reconcileTimer);
       reconcileTimer = null;
     }
-    void workerPromise;
-    workerPromise = null;
+    void Promise.allSettled(workerPromises);
+    workerPromises = [];
   }
 
   return {

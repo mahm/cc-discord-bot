@@ -5,7 +5,7 @@ import {
   DISCORD_CONNECTION_DEFAULT_RECONNECT_GRACE_SECONDS,
   DISCORD_CONNECTION_DEFAULT_STALE_THRESHOLD_SECONDS,
   parseBotSettings,
-} from "../../src/core/bot-settings";
+} from "../../src/core/runtime-settings";
 
 describe("parseBotSettings", () => {
   it("parses valid config and applies timeout default", () => {

@@ -4,6 +4,7 @@ import {
   buildDockerExecEnvArgs,
   buildProgressHint,
   renderPromptTemplate,
+  resolveClaudeQueueKey,
 } from "../../src/adapters/claude-adapter";
 
 describe("buildProgressHint", () => {
@@ -112,5 +113,24 @@ describe("buildDockerExecEnvArgs", () => {
 
     expect(result.ignoredKeys).toEqual(["CLAUDECODE", "FORCE_COLOR"]);
     expect(result.args).toEqual(["-e", "FORCE_COLOR=0", "-e", "CLAUDECODE="]);
+  });
+});
+
+describe("resolveClaudeQueueKey", () => {
+  it("uses shared main queue for main session target", () => {
+    expect(resolveClaudeQueueKey()).toBe("main");
+    expect(resolveClaudeQueueKey({ mode: "main" })).toBe("main");
+  });
+
+  it("uses schedule-specific queue for isolated session target", () => {
+    expect(resolveClaudeQueueKey({ mode: "isolated", scheduleName: "email-triage" })).toBe(
+      "isolated:email-triage",
+    );
+  });
+
+  it("normalizes unknown characters in isolated schedule names", () => {
+    expect(resolveClaudeQueueKey({ mode: "isolated", scheduleName: "daily/review v2" })).toBe(
+      "isolated:daily_review_v2",
+    );
   });
 });

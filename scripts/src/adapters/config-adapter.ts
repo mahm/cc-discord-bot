@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { config as dotenvConfig } from "dotenv";
-import type { BotSettings } from "../core/bot-settings";
+import type { BotSettings } from "../core/runtime-settings";
 
 // import.meta.dir points to scripts/src/adapters
 const ADAPTER_ROOT = import.meta.dir;

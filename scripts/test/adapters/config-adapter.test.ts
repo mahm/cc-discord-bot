@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { applyBotSettingsToConfig, loadConfig } from "../../src/adapters/config-adapter";
-import { parseBotSettings } from "../../src/core/bot-settings";
+import { parseBotSettings } from "../../src/core/runtime-settings";
 
 const ORIGINAL_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const ORIGINAL_ALLOWED_IDS = process.env.DISCORD_ALLOWED_USER_IDS;

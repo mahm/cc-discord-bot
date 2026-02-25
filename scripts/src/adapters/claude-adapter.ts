@@ -30,8 +30,8 @@ interface ClaudeJob {
   reject: (reason?: unknown) => void;
 }
 
-const claudeQueue: ClaudeJob[] = [];
-let queueWorkerRunning = false;
+const claudeQueues = new Map<string, ClaudeJob[]>();
+const runningQueueKeys = new Set<string>();
 let cachedSandboxId: string | null = null;
 const DISCORD_USER_ID_PATTERN = /^\d{17,20}$/;
 const FIXED_CLAUDE_ENV_KEYS = ["FORCE_COLOR", "CLAUDECODE"] as const;
@@ -126,7 +126,7 @@ function resolveSessionFile(config: Config, target?: SessionTarget): string {
   if (!target || target.mode === "main") {
     return config.sessionFile;
   }
-  const safeName = (target.scheduleName ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeName = toSafeScheduleName(target.scheduleName);
   return path.join(config.sessionsDir, `${safeName}.txt`);
 }
 
@@ -135,6 +135,17 @@ function resolveSessionDir(config: Config, target?: SessionTarget): string {
     return config.sessionDir;
   }
   return config.sessionsDir;
+}
+
+function toSafeScheduleName(scheduleName: string | undefined): string {
+  return (scheduleName ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+export function resolveClaudeQueueKey(target?: SessionTarget): string {
+  if (!target || target.mode === "main") {
+    return "main";
+  }
+  return `isolated:${toSafeScheduleName(target.scheduleName)}`;
 }
 
 async function readSessionId(config: Config, target?: SessionTarget): Promise<string | null> {
@@ -511,16 +522,21 @@ async function runClaudeCommand(
   }
 }
 
-async function runQueue(): Promise<void> {
-  if (queueWorkerRunning) {
+async function runQueue(queueKey: string): Promise<void> {
+  if (runningQueueKeys.has(queueKey)) {
     return;
   }
 
-  queueWorkerRunning = true;
+  runningQueueKeys.add(queueKey);
 
   try {
-    while (claudeQueue.length > 0) {
-      const job = claudeQueue.shift();
+    const queue = claudeQueues.get(queueKey);
+    if (!queue) {
+      return;
+    }
+
+    while (queue.length > 0) {
+      const job = queue.shift();
       if (!job) {
         continue;
       }
@@ -533,9 +549,12 @@ async function runQueue(): Promise<void> {
       }
     }
   } finally {
-    queueWorkerRunning = false;
-    if (claudeQueue.length > 0) {
-      void runQueue();
+    runningQueueKeys.delete(queueKey);
+    const queue = claudeQueues.get(queueKey);
+    if (!queue || queue.length === 0) {
+      claudeQueues.delete(queueKey);
+    } else {
+      void runQueue(queueKey);
     }
   }
 }
@@ -546,8 +565,11 @@ export async function sendToClaude(
   options?: SendToClaudeOptions,
 ): Promise<ClaudeResponse> {
   return new Promise<ClaudeResponse>((resolve, reject) => {
-    claudeQueue.push({ message, config, options, resolve, reject });
-    void runQueue();
+    const queueKey = resolveClaudeQueueKey(options?.sessionTarget);
+    const queue = claudeQueues.get(queueKey) ?? [];
+    queue.push({ message, config, options, resolve, reject });
+    claudeQueues.set(queueKey, queue);
+    void runQueue(queueKey);
   });
 }
 

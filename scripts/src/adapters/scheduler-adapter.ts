@@ -2,19 +2,13 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { Cron } from "croner";
 import { SCHEDULER_EVENT_TTL_MS, type SchedulerTriggeredEventPayload } from "../core/bot-events";
-import { type BotSettings, parseBotSettings } from "../core/bot-settings";
 import { formatConversationAsMarkdown, type SqliteEventBus } from "../core/event-bus";
 import { isSkipResponse, stripThinkTags } from "../core/message-format";
+import type { BotSettings } from "../core/runtime-settings";
 import { type SessionTarget, sendToClaude } from "./claude-adapter";
 import type { Config } from "./config-adapter";
 
 type Schedule = BotSettings["schedules"][number];
-
-export async function loadBotSettings(config: Config): Promise<BotSettings> {
-  const settingsPath = path.join(config.projectRoot, ".claude", "settings.bot.json");
-  const content = await readFile(settingsPath, "utf-8");
-  return parseBotSettings(content);
-}
 
 async function readTodayHandoffs(handoffsDir: string): Promise<string[]> {
   const now = new Date();
