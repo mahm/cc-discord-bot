@@ -168,6 +168,15 @@ export class SqliteEventBus {
         last_seen_message_id TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS dm_send_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dm_send_log_lookup
+        ON dm_send_log(user_id, content_hash, sent_at);
     `);
   }
 
@@ -623,6 +632,33 @@ export class SqliteEventBus {
       )
       .all(Math.max(1, limit)) as ConversationMessage[];
     return rows;
+  }
+
+  hasRecentSend(userId: string, contentHash: string, windowMs: number): boolean {
+    const cutoff = Date.now() - windowMs;
+    const row = this.db
+      .query(
+        `
+          SELECT 1
+          FROM dm_send_log
+          WHERE user_id = ? AND content_hash = ? AND sent_at > ?
+          LIMIT 1
+        `,
+      )
+      .get(userId, contentHash, cutoff) as { 1: number } | null;
+    return row !== null;
+  }
+
+  recordSend(userId: string, contentHash: string): void {
+    const now = Date.now();
+    this.db
+      .query(
+        `
+          INSERT INTO dm_send_log (user_id, content_hash, sent_at)
+          VALUES (?, ?, ?)
+        `,
+      )
+      .run(userId, contentHash, now);
   }
 
   getDbPath(): string {

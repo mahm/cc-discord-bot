@@ -145,6 +145,14 @@ function isRecoverPayload(payload: unknown): payload is DmRecoverRunEventPayload
   return typeof maybe.reason === "string";
 }
 
+function simpleHash(text: string): string {
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) + hash + text.charCodeAt(i)) & 0xffffffff;
+  }
+  return hash.toString(36);
+}
+
 function isReconcilePayload(payload: unknown): payload is DmReconcileRunEventPayload {
   if (!payload || typeof payload !== "object") {
     return false;
@@ -321,6 +329,17 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
   }
 
   async function handleOutboundDmRequest(payload: OutboundDmRequestPayload): Promise<void> {
+    const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+    const userId = payload.userId ?? "";
+    let contentHash: string | undefined;
+    if (userId && payload.text) {
+      contentHash = simpleHash(userId + payload.text.slice(0, 500));
+      if (input.eventBus.hasRecentSend(userId, contentHash, DEDUP_WINDOW_MS)) {
+        console.log(`[dedup] Skipping duplicate DM (user=${userId}, hash=${contentHash})`);
+        return;
+      }
+    }
+
     const files = (payload.files ?? []).map((file) => ({
       path: String(file.path ?? ""),
       name: String(file.name ?? "file"),
@@ -340,10 +359,12 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
         ...deliveryPolicy,
         context: payload.context,
       });
+      if (userId && contentHash) {
+        input.eventBus.recordSend(userId, contentHash);
+      }
       return;
     }
 
-    const userId = payload.userId;
     if (!userId) {
       throw new TerminalEventError("outbound.dm.request requires userId or channelId");
     }
@@ -352,6 +373,9 @@ export function createEventRuntime(input: CreateEventRuntimeInput): EventRuntime
       ...deliveryPolicy,
       context: payload.context,
     });
+    if (contentHash) {
+      input.eventBus.recordSend(userId, contentHash);
+    }
   }
 
   async function processDmMessage(message: Message<boolean>): Promise<void> {
